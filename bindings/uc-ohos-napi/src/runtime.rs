@@ -5,18 +5,21 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    CancelJoinSpaceInput, ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput,
-    DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary, Engine, EngineConfig, EngineError,
-    EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
-    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
-    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
-    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput,
+    CancelJoinSpaceInput, ClipboardRestoreMode, ClipboardRestoreOutcome, ContentTypesPatch,
+    ContentTypesSummary, CreateSpaceInput, DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary,
+    Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput,
+    HostFileHandle, InvitationAvailability, JoinSpaceInput, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesSummary, Operation, OperationResult, OperationTerminal,
+    QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
+    SendTextInput, UpdateMemberSyncPreferencesInput,
 };
 use zeroize::Zeroizing;
 
 use crate::{
-    host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhSendReport,
+    host, OhActiveClipboard, OhContentTypes, OhContentTypesPatch, OhEngineConfig, OhEngineEvent,
+    OhHost, OhInvitationIssued, OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice,
+    OhMemberSyncPreferences, OhMemberSyncPreferencesPatch, OhNetworkRecoveryStatus, OhSendReport,
     OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
 };
 
@@ -147,6 +150,50 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::DeviceTrust(snapshot) => device_trust_json(snapshot),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_member_sync_preferences(
+        &self,
+        device_id: String,
+    ) -> napi::Result<OhMemberSyncPreferences> {
+        match self
+            .engine
+            .execute(Operation::QueryMemberSyncPreferences(
+                QueryMemberSyncPreferencesInput { device_id },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::MemberSyncPreferences(preferences) => {
+                Ok(member_sync_preferences(preferences))
+            }
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn update_member_sync_preferences(
+        &self,
+        device_id: String,
+        patch: OhMemberSyncPreferencesPatch,
+    ) -> napi::Result<OhMemberSyncPreferences> {
+        match self
+            .engine
+            .execute(Operation::UpdateMemberSyncPreferences(
+                UpdateMemberSyncPreferencesInput {
+                    device_id,
+                    patch: member_sync_preferences_patch(patch),
+                },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::MemberSyncPreferences(preferences) => {
+                Ok(member_sync_preferences(preferences))
+            }
             _ => Err(unexpected_result()),
         }
     }
@@ -594,6 +641,48 @@ fn invitation_availability(availability: InvitationAvailability) -> &'static str
     match availability {
         InvitationAvailability::CrossNetwork => "cross_network",
         InvitationAvailability::SameLocalNetwork => "same_local_network",
+    }
+}
+
+fn member_sync_preferences(preferences: MemberSyncPreferencesSummary) -> OhMemberSyncPreferences {
+    OhMemberSyncPreferences {
+        send_enabled: preferences.send_enabled,
+        receive_enabled: preferences.receive_enabled,
+        send_content_types: content_types(preferences.send_content_types),
+        receive_content_types: content_types(preferences.receive_content_types),
+    }
+}
+
+fn content_types(types: ContentTypesSummary) -> OhContentTypes {
+    OhContentTypes {
+        text: types.text,
+        image: types.image,
+        link: types.link,
+        file: types.file,
+        code_snippet: types.code_snippet,
+        rich_text: types.rich_text,
+    }
+}
+
+fn member_sync_preferences_patch(
+    patch: OhMemberSyncPreferencesPatch,
+) -> MemberSyncPreferencesPatch {
+    MemberSyncPreferencesPatch {
+        send_enabled: patch.send_enabled,
+        receive_enabled: patch.receive_enabled,
+        send_content_types: patch.send_content_types.map(content_types_patch),
+        receive_content_types: patch.receive_content_types.map(content_types_patch),
+    }
+}
+
+fn content_types_patch(patch: OhContentTypesPatch) -> ContentTypesPatch {
+    ContentTypesPatch {
+        text: patch.text,
+        image: patch.image,
+        link: patch.link,
+        file: patch.file,
+        code_snippet: patch.code_snippet,
+        rich_text: patch.rich_text,
     }
 }
 

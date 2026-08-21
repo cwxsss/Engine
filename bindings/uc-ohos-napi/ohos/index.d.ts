@@ -68,6 +68,38 @@ export interface OhLocalDevice {
   displayName: string
 }
 
+export interface OhContentTypes {
+  text: boolean
+  image: boolean
+  link: boolean
+  file: boolean
+  codeSnippet: boolean
+  richText: boolean
+}
+
+export interface OhMemberSyncPreferences {
+  sendEnabled: boolean
+  receiveEnabled: boolean
+  sendContentTypes: OhContentTypes
+  receiveContentTypes: OhContentTypes
+}
+
+export interface OhContentTypesPatch {
+  text?: boolean
+  image?: boolean
+  link?: boolean
+  file?: boolean
+  codeSnippet?: boolean
+  richText?: boolean
+}
+
+export interface OhMemberSyncPreferencesPatch {
+  sendEnabled?: boolean
+  receiveEnabled?: boolean
+  sendContentTypes?: OhContentTypesPatch
+  receiveContentTypes?: OhContentTypesPatch
+}
+
 export interface OhMembershipConvergence {
   state: 'complete' | 'converging' | 'waiting_for_upgrade' | 'blocked'
   pendingCount: number
@@ -154,6 +186,11 @@ export interface OhEngine {
   recoverNetwork(): Promise<void>
   queryNetworkRecoveryStatus(): Promise<OhNetworkRecoveryStatus>
   queryLocalDevice(): Promise<OhLocalDevice>
+  queryMemberSyncPreferences(deviceId: string): Promise<OhMemberSyncPreferences>
+  updateMemberSyncPreferences(
+    deviceId: string,
+    patch: OhMemberSyncPreferencesPatch
+  ): Promise<OhMemberSyncPreferences>
   queryMembershipConvergence(): Promise<OhMembershipConvergence>
   refreshSharedDevices(): Promise<OhSharedDeviceRefreshStarted>
   querySharedDeviceRefresh(requestId: string): Promise<OhSharedDeviceRefresh | null>

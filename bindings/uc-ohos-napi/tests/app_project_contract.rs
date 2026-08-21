@@ -61,6 +61,17 @@ fn ohos_probe_declares_the_engine_napi_module() {
 }
 
 #[test]
+fn ohos_binding_exposes_member_sync_preferences() {
+    let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
+
+    assert!(declarations.contains(
+        "queryMemberSyncPreferences(deviceId: string): Promise<OhMemberSyncPreferences>"
+    ));
+    assert!(declarations.contains("updateMemberSyncPreferences("));
+    assert!(declarations.contains("patch: OhMemberSyncPreferencesPatch"));
+}
+
+#[test]
 fn ohos_probe_builds_the_arm64_binding_before_assembling_the_hap() {
     let script = read("tests/hosts/ohos/build-emulator.sh");
     assert!(script.contains("aarch64-unknown-linux-ohos"));
