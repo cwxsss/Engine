@@ -5,22 +5,24 @@ use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    CancelJoinSpaceInput, ClipboardRestoreMode, ClipboardRestoreOutcome, ContentTypesPatch,
-    ContentTypesSummary, CreateSpaceInput, DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary,
-    Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput,
-    HostFileHandle, InvitationAvailability, JoinSpaceInput, MemberSyncPreferencesPatch,
+    BlobResourceInput, CancelJoinSpaceInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
+    ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DecideDeviceTrustChangeInput,
+    DeviceTrustChoiceSummary, Engine, EngineConfig, EngineError, EngineEvent, EngineState,
+    EventStream, ExportEntryInput, HistoryEntryInput, HostFileHandle, InvitationAvailability,
+    JoinSpaceInput, ListHistoryEntriesInput, MemberSyncPreferencesPatch,
     MemberSyncPreferencesSummary, Operation, OperationResult, OperationTerminal,
     QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
     RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
-    SendTextInput, UpdateMemberSyncPreferencesInput,
+    SendTextInput, SetHistoryEntryFavoriteInput, UpdateMemberSyncPreferencesInput,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhContentTypes, OhContentTypesPatch, OhEngineConfig, OhEngineEvent,
-    OhHost, OhInvitationIssued, OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice,
-    OhMemberSyncPreferences, OhMemberSyncPreferencesPatch, OhNetworkRecoveryStatus, OhSendReport,
-    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
+    OhHistoryEntryDetail, OhHistoryEntryResource, OhHistoryEntrySummary, OhHost,
+    OhInvitationIssued, OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhMemberSyncPreferences,
+    OhMemberSyncPreferencesPatch, OhNetworkRecoveryStatus, OhSendReport, OhSessionRecovery,
+    OhSpaceCreated, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -402,6 +404,134 @@ impl OhEngine {
     }
 
     #[napi]
+    pub async fn list_history_entries(
+        &self,
+        limit: u32,
+        offset: f64,
+    ) -> napi::Result<Vec<OhHistoryEntrySummary>> {
+        let offset = non_negative_u64(offset, "offset")?;
+        match self
+            .engine
+            .execute(Operation::ListHistoryEntries(ListHistoryEntriesInput {
+                limit,
+                offset,
+            }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::HistoryEntries(entries) => Ok(entries
+                .into_iter()
+                .map(|entry| OhHistoryEntrySummary {
+                    entry_id: entry.entry_id,
+                    preview: entry.preview,
+                    size_bytes: entry.size_bytes as f64,
+                    captured_at_ms: entry.captured_at_ms as f64,
+                    content_type: entry.content_type,
+                    is_favorited: entry.is_favorited,
+                    active_time_ms: entry.active_time_ms as f64,
+                    content_tags: entry.content_tags,
+                })
+                .collect()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn get_history_entry(&self, entry_id: String) -> napi::Result<OhHistoryEntryDetail> {
+        match self
+            .engine
+            .execute(Operation::GetHistoryEntry(HistoryEntryInput { entry_id }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::HistoryEntry(entry) => Ok(OhHistoryEntryDetail {
+                entry_id: entry.entry_id,
+                content: entry.content,
+                size_bytes: entry.size_bytes as f64,
+                created_at_ms: entry.created_at_ms as f64,
+                active_time_ms: entry.active_time_ms as f64,
+                mime_type: entry.mime_type,
+            }),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn delete_history_entry(&self, entry_id: String) -> napi::Result<()> {
+        match self
+            .engine
+            .execute(Operation::DeleteHistoryEntry(HistoryEntryInput {
+                entry_id,
+            }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::HistoryEntryDeleted => Ok(()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn set_history_entry_favorite(
+        &self,
+        entry_id: String,
+        is_favorited: bool,
+    ) -> napi::Result<()> {
+        match self
+            .engine
+            .execute(Operation::SetHistoryEntryFavorite(
+                SetHistoryEntryFavoriteInput {
+                    entry_id,
+                    is_favorited,
+                },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::HistoryEntryFavoriteSet => Ok(()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn read_history_entry_resource(
+        &self,
+        entry_id: String,
+    ) -> napi::Result<OhHistoryEntryResource> {
+        let resource = match self
+            .engine
+            .execute(Operation::GetHistoryEntryResource(HistoryEntryInput {
+                entry_id,
+            }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::HistoryEntryResource(resource) => resource,
+            _ => return Err(unexpected_result()),
+        };
+        let bytes = if let Some(bytes) = resource.inline_data {
+            bytes
+        } else if let Some(blob_id) = resource.blob_id {
+            match self
+                .engine
+                .execute(Operation::ReadBlob(BlobResourceInput { blob_id }))
+                .await
+                .map_err(engine_error)?
+            {
+                OperationResult::BlobRead(resource) => resource.bytes,
+                _ => return Err(unexpected_result()),
+            }
+        } else {
+            Vec::new()
+        };
+        Ok(OhHistoryEntryResource {
+            mime_type: resource.mime_type,
+            size_bytes: resource.size_bytes as f64,
+            bytes: bytes.into(),
+        })
+    }
+
+    #[napi]
     pub async fn restore_clipboard(&self, entry_id: String, mode: String) -> napi::Result<String> {
         let mode = match mode.as_str() {
             "standard" => ClipboardRestoreMode::Standard,
@@ -485,6 +615,16 @@ impl OhEngine {
             .await
             .map_err(engine_error)
     }
+}
+
+fn non_negative_u64(value: f64, field: &str) -> napi::Result<u64> {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u64::MAX as f64 {
+        return Err(napi::Error::new(
+            Status::InvalidArg,
+            format!("invalid {field}"),
+        ));
+    }
+    Ok(value as u64)
 }
 
 fn workspace_convergence(

@@ -134,6 +134,35 @@ pub struct OhActiveClipboard {
 }
 
 #[napi(object)]
+pub struct OhHistoryEntrySummary {
+    pub entry_id: String,
+    pub preview: String,
+    pub size_bytes: f64,
+    pub captured_at_ms: f64,
+    pub content_type: String,
+    pub is_favorited: bool,
+    pub active_time_ms: f64,
+    pub content_tags: Vec<String>,
+}
+
+#[napi(object)]
+pub struct OhHistoryEntryDetail {
+    pub entry_id: String,
+    pub content: String,
+    pub size_bytes: f64,
+    pub created_at_ms: f64,
+    pub active_time_ms: f64,
+    pub mime_type: Option<String>,
+}
+
+#[napi(object)]
+pub struct OhHistoryEntryResource {
+    pub mime_type: Option<String>,
+    pub size_bytes: f64,
+    pub bytes: Buffer,
+}
+
+#[napi(object)]
 pub struct OhInvitationIssued {
     pub invitation_code: String,
     pub expires_at_ms: f64,

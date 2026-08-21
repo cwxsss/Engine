@@ -126,47 +126,54 @@ fn ohos_probe_page_loads_the_engine_version_from_napi() {
 }
 
 #[test]
-fn ohos_probe_exposes_membership_convergence_from_the_engine() {
+fn ohos_binding_declarations_match_the_runtime_surface() {
     let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
-    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
-    let page = read("tests/hosts/ohos/entry/src/main/ets/pages/Index.ets");
-
-    assert!(declarations.contains("queryMembershipConvergence(): Promise<OhMembershipConvergence>"));
-    assert!(runtime.contains("active.queryMembershipConvergence()"));
-    assert!(runtime.contains("convergenceState"));
-    assert!(page.contains("snapshot.convergenceState"));
-}
-
-#[test]
-fn ohos_probe_exposes_the_complete_member_removal_contract() {
-    let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
-    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
-    let page = read("tests/hosts/ohos/entry/src/main/ets/pages/Index.ets");
+    let runtime = read("bindings/uc-ohos-napi/src/runtime.rs");
 
     for method in [
-        "removeMember(deviceId: string): Promise<OhMemberRemoval>",
-        "queryMemberRemoval(): Promise<OhMemberRemoval>",
+        "queryDeviceTrust(): Promise<string>",
+        "decideDeviceTrustChange(",
+        "removeMember(deviceId: string): Promise<OhWorkspaceConvergence>",
+        "issueInvitation(): Promise<OhInvitationIssued>",
+        "joinSpace(",
+        "cancelJoinSpace(joinId: string): Promise<OhJoinSpaceStatus>",
+        "sendImage(bytes: ArrayBuffer, mimeType: string, targetDevices: string[])",
+        "sendFiles(fileHandles: string[], targetDevices: string[])",
+        "captureCurrentClipboard(): Promise<string | null>",
+        "restoreClipboard(entryId: string, mode:",
+        "listHistoryEntries(limit: number, offset: number)",
+        "getHistoryEntry(entryId: string): Promise<OhHistoryEntryDetail>",
+        "deleteHistoryEntry(entryId: string): Promise<void>",
+        "setHistoryEntryFavorite(entryId: string, isFavorited: boolean): Promise<void>",
+        "readHistoryEntryResource(entryId: string): Promise<OhHistoryEntryResource>",
         "nextEvent(timeoutMs: number): Promise<OhEngineEvent | null>",
     ] {
         assert!(declarations.contains(method), "missing method: {method}");
     }
-    for field in [
-        "phase: 'applied' | 'converging' | 'complete' | 'recovery_required'",
-        "intentCount: number",
-        "effectiveMemberCount: number",
-        "convergenceDigest?: string",
-        "updatedAtMs: number",
-        "memberRemoval?: OhMemberRemoval",
+    for rust_method in [
+        "pub async fn query_device_trust",
+        "pub async fn decide_device_trust_change",
+        "pub async fn remove_member",
+        "pub async fn issue_invitation",
+        "pub async fn join_space",
+        "pub async fn cancel_join_space",
+        "pub async fn send_image",
+        "pub async fn send_files",
+        "pub async fn capture_current_clipboard",
+        "pub async fn restore_clipboard",
+        "pub async fn list_history_entries",
+        "pub async fn get_history_entry",
+        "pub async fn delete_history_entry",
+        "pub async fn set_history_entry_favorite",
+        "pub async fn read_history_entry_resource",
     ] {
-        assert!(declarations.contains(field), "missing field: {field}");
+        assert!(
+            runtime.contains(rust_method),
+            "missing runtime method: {rust_method}"
+        );
     }
-    assert!(runtime.contains("active.queryMemberRemoval()"));
-    assert!(runtime.contains("effectiveMemberCount: removal.effectiveMemberCount"));
-    assert!(runtime.contains("updatedAtMs: removal.updatedAtMs"));
-    assert!(page.contains("snapshot.memberRemovalState"));
-    assert!(page.contains("Button('Member removal')"));
-    assert!(page.contains("Member removal query failed"));
-    assert!(page.contains("void this.queryCurrentMemberRemoval();"));
+    assert!(!declarations.contains("queryMembershipConvergence"));
+    assert!(!declarations.contains("queryMemberRemoval"));
 }
 
 #[test]
