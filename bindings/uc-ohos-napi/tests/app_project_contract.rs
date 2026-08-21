@@ -90,6 +90,9 @@ fn ohos_binding_owns_a_distributable_har_module() {
     let script = read("tests/hosts/ohos/build-emulator.sh");
 
     assert!(entry.contains("import engine from 'libuc_ohos_napi.so'"));
+    assert!(entry.contains("export type {"));
+    assert!(entry.contains("OhMemberSyncPreferencesPatch"));
+    assert!(entry.contains("OhHistoryEntryResource"));
     assert!(entry.contains("export default engine"));
     assert_eq!(module["module"]["type"], "har");
     assert!(package.contains("@uniclipboard/engine"));
