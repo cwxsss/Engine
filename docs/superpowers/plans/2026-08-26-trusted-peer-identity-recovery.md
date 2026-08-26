@@ -36,7 +36,7 @@ Reuse `create_space`, `join_through`, `recover`, `wait_for_converged_members_wit
 Run:
 
 ```powershell
-cargo test -p uc-engine --test space_membership_auto_pairing_e2e restarted_sponsor_accepts_clipboard_from_recovered_joiner -- --nocapture
+cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e restarted_sponsor_accepts_clipboard_from_recovered_joiner -- --nocapture
 ```
 
 Expected: fail with a rejected delivery if the production gap remains. Rebase the plan/docs commits onto the Windows-pinned `v1.1.0-rc.6` commit `f449698b6e96e5d99549c3fdd076dcd8e68118ce` before final verification. If the test passes there, retain it as a characterization regression and do not invent a production change; the already-landed durable admission replay is the fix that HarmonyOS must consume.
@@ -55,7 +55,7 @@ The correction must replay the paired member ID and authenticated fingerprint at
 Run:
 
 ```powershell
-cargo test -p uc-engine --test space_membership_auto_pairing_e2e restarted_sponsor_accepts_clipboard_from_recovered_joiner -- --nocapture
+cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e restarted_sponsor_accepts_clipboard_from_recovered_joiner -- --nocapture
 cargo test -p uc-application sponsor_recovery_finishes_durable_candidate_after_restart -- --nocapture
 cargo test -p uc-application sponsor_accepts_next_candidate_after_recovery_converges -- --nocapture
 ```
