@@ -39,7 +39,7 @@ Run:
 cargo test -p uc-engine --test space_membership_auto_pairing_e2e restarted_sponsor_accepts_clipboard_from_recovered_joiner -- --nocapture
 ```
 
-Expected: fail with a rejected delivery if the production gap remains. If it passes on current `ed3c6ac`, retain it as a characterization regression and do not invent a production change; the already-landed durable admission replay is the fix that HarmonyOS must consume.
+Expected: fail with a rejected delivery if the production gap remains. Rebase the plan/docs commits onto the Windows-pinned `v1.1.0-rc.6` commit `f449698b6e96e5d99549c3fdd076dcd8e68118ce` before final verification. If the test passes there, retain it as a characterization regression and do not invent a production change; the already-landed durable admission replay is the fix that HarmonyOS must consume.
 
 **Step 3: If RED, make the minimum secure recovery correction**
 
@@ -154,7 +154,7 @@ Run:
 
 ```powershell
 node scripts/architecture/check-engine-repository.mjs
-node scripts/release/verify-version.mjs v1.1.0-rc.5 uc-engine
+node scripts/release/verify-version.mjs v1.1.0-rc.6 uc-engine
 git status --short
 git rev-parse HEAD
 ```
@@ -175,8 +175,8 @@ git commit -m "chore: align HarmonyOS engine binding metadata"
 **Step 1: Inspect change scope**
 
 ```powershell
-git diff ed3c6ac...HEAD --stat
-git diff ed3c6ac...HEAD
+git diff f449698b6e96e5d99549c3fdd076dcd8e68118ce...HEAD --stat
+git diff f449698b6e96e5d99549c3fdd076dcd8e68118ce...HEAD
 git status --short
 ```
 
