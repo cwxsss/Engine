@@ -1,8 +1,8 @@
 //! Process-wide iroh runtime configuration.
 //!
-//! The active node owns these values through `NodeRunLease`. The state is
-//! reset before that lease is released, so a replacement node cannot inherit a
-//! previous node's bind-time configuration.
+//! Live nodes share this adapter policy through `NodeRunLease`. The state is
+//! reset only after the last lease is released, so concurrent profile nodes
+//! keep a consistent bind-time configuration.
 
 #[cfg(not(any(test, feature = "test-util")))]
 use std::sync::Mutex;
@@ -13,8 +13,7 @@ use tracing::warn;
 #[cfg(not(any(test, feature = "test-util")))]
 static LAN_ONLY: Mutex<bool> = Mutex::new(false);
 
-/// Install the active node's LAN-only policy. Test multi-node harnesses do not
-/// share a process-wide policy and therefore retain the no-op implementation.
+/// Install the process-wide LAN-only policy for the live node set.
 pub(crate) fn install_lan_only(lan_only: bool) {
     #[cfg(not(any(test, feature = "test-util")))]
     {
@@ -30,7 +29,7 @@ pub(crate) fn install_lan_only(lan_only: bool) {
     }
 }
 
-/// Clear the active node's LAN-only policy before its runtime lease is
+/// Clear the process-wide LAN-only policy after the last runtime lease is
 /// released. Test multi-node harnesses intentionally have no shared policy.
 #[cfg(not(any(test, feature = "test-util")))]
 pub(crate) fn clear_lan_only() {
@@ -44,7 +43,7 @@ pub(crate) fn clear_lan_only() {
     }
 }
 
-/// Whether the active production node is in LAN-only mode. Test multi-node
+/// Whether the live production node set is in LAN-only mode. Test multi-node
 /// harnesses always return false because no global node policy exists there.
 pub(crate) fn lan_only() -> bool {
     #[cfg(not(any(test, feature = "test-util")))]

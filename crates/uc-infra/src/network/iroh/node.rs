@@ -585,25 +585,32 @@ fn relay_mode_from_config(config: &IrohNodeConfig) -> Result<RelayMode, IrohNode
     Ok(RelayMode::Custom(relay_configs.into_iter().collect()))
 }
 
-/// A process-wide lease prevents two live production endpoints from sharing
-/// mutable runtime state. Unlike the former `OnceLock`, the lease is owned by
-/// the builder and then the live node, so a completed shutdown permits restart.
+/// Process-wide state shared by endpoint adapters.
+///
+/// Endpoints themselves are independent and may coexist in one process. The
+/// LAN-only decision is the remaining process-wide adapter policy, so all live
+/// nodes must use the same value until the last node shuts down.
 #[cfg(not(any(test, feature = "test-util")))]
-static NODE_RUN_ACTIVE: Mutex<bool> = Mutex::new(false);
+static NODE_RUN_STATE: Mutex<(usize, bool)> = Mutex::new((0, false));
 
 struct NodeRunLease;
 
 impl NodeRunLease {
-    fn acquire() -> Result<Self, IrohNodeError> {
+    fn acquire(lan_only: bool) -> Result<Self, IrohNodeError> {
         #[cfg(not(any(test, feature = "test-util")))]
         {
-            let mut active = NODE_RUN_ACTIVE
+            let mut state = NODE_RUN_STATE
                 .lock()
                 .map_err(|_| IrohNodeError::RuntimeStatePoisoned)?;
-            if *active {
-                return Err(IrohNodeError::AlreadyRunning);
+            if state.0 > 0 && state.1 != lan_only {
+                return Err(IrohNodeError::RuntimePolicyConflict {
+                    active_lan_only: state.1,
+                    requested_lan_only: lan_only,
+                });
             }
-            *active = true;
+            state.0 += 1;
+            state.1 = lan_only;
+            super::runtime_consts::install_lan_only(lan_only);
         }
         Ok(Self)
     }
@@ -613,11 +620,14 @@ impl Drop for NodeRunLease {
     fn drop(&mut self) {
         #[cfg(not(any(test, feature = "test-util")))]
         {
-            // Clear the runtime configuration before releasing the lease so a
-            // newly-bound node cannot inherit the previous node's LAN policy.
-            super::runtime_consts::clear_lan_only();
-            match NODE_RUN_ACTIVE.lock() {
-                Ok(mut active) => *active = false,
+            match NODE_RUN_STATE.lock() {
+                Ok(mut state) => {
+                    state.0 = state.0.saturating_sub(1);
+                    if state.0 == 0 {
+                        state.1 = false;
+                        super::runtime_consts::clear_lan_only();
+                    }
+                }
                 Err(_) => warn!("iroh node runtime state lock poisoned during release"),
             }
         }
@@ -658,10 +668,9 @@ impl IrohNodeBuilder {
         identity_store: &IrohIdentityStore,
         config: IrohNodeConfig,
     ) -> Result<Self, IrohNodeError> {
-        let run_lease = NodeRunLease::acquire()?;
-
         let secret = identity_store.ensure_secret_key()?;
         let relay_mode = relay_mode_from_config(&config)?;
+        let run_lease = NodeRunLease::acquire(config.disable_relays)?;
         // Snapshot the overlay flag before consuming `config` into `Self`.
         let allow_overlay = config.allow_overlay_network_addrs;
         info!(
@@ -691,14 +700,8 @@ impl IrohNodeBuilder {
         // 对方"的用户预期相悖。所以 `disable_relays = true` 路径下显式 clear
         // 掉 N0 注入的 lookup services，再单挂 mDNS。
         //
-        // 同步把 LAN-only 状态固化到 `runtime_consts::LAN_ONLY` 进程常量 ——
-        // `connect.rs` 出站 dial 时会读这个常量，从对端 `EndpointAddr` 中剥掉
-        // `TransportAddr::Relay`。否则即便本端 `RelayMode::Disabled`，iroh 仍
-        // 会用对端发布的 relay url 走中转（已在 dev 日志中观测到）。
-        //
-        // 取舍：跨网段已配对设备无法通过 NodeId 反查到，这是 LAN-only 的设计
-        // 意图（不是 bug）。
-        super::runtime_consts::install_lan_only(config.disable_relays);
+        // `NodeRunLease` keeps the process-wide adapter policy consistent
+        // while allowing independent profile endpoints to run concurrently.
         if config.disable_relays {
             endpoint_builder = endpoint_builder.clear_address_lookup();
             info!(
@@ -1402,11 +1405,16 @@ impl IrohNodeBuilder {
 /// types don't leak third-party error types upward).
 #[derive(Debug, thiserror::Error)]
 pub enum IrohNodeError {
-    #[error("an iroh node is already running in this process")]
-    AlreadyRunning,
-
     #[error("iroh node runtime state lock is poisoned")]
     RuntimeStatePoisoned,
+
+    #[error(
+        "all live iroh nodes must use the same LAN-only policy (active={active_lan_only}, requested={requested_lan_only})"
+    )]
+    RuntimePolicyConflict {
+        active_lan_only: bool,
+        requested_lan_only: bool,
+    },
 
     #[error("failed to bind iroh endpoint: {0}")]
     Bind(String),

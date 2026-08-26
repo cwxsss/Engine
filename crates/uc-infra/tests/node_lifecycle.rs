@@ -1,7 +1,6 @@
 #![cfg(not(feature = "test-util"))]
 
-// This test exercises the production single-node lease. Multi-node E2E
-// harnesses enable `test-util` and intentionally use a different runtime shape.
+// This test exercises production endpoint lifecycle and multi-node behavior.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, UdpSocket};
@@ -9,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use uc_core::ports::{LocalIdentityPort, SecureStorageError, SecureStoragePort};
-use uc_infra::network::iroh::{IrohIdentityStore, IrohNodeBuilder, IrohNodeConfig, IrohNodeError};
+use uc_infra::network::iroh::{IrohIdentityStore, IrohNodeBuilder, IrohNodeConfig};
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 
 #[derive(Default)]
@@ -49,7 +48,7 @@ async fn production_node_restarts_ten_times_with_stable_identity_and_released_po
     let port = port_probe.local_addr().expect("read test port").port();
     drop(port_probe);
 
-    let identity_store = identity_store();
+    let primary_identity_store = identity_store();
     let config = IrohNodeConfig {
         bind_port: Some(port),
         disable_relays: true,
@@ -60,23 +59,32 @@ async fn production_node_restarts_ten_times_with_stable_identity_and_released_po
     for cycle in 0..10 {
         let builder = tokio::time::timeout(
             Duration::from_secs(30),
-            IrohNodeBuilder::bind(&identity_store, config.clone()),
+            IrohNodeBuilder::bind(&primary_identity_store, config.clone()),
         )
         .await
         .expect("production bind exceeded 30 seconds")
         .expect("bind production node");
 
         if cycle == 0 {
+            let second_identity_store = identity_store();
+            let second_config = IrohNodeConfig {
+                bind_port: None,
+                disable_relays: true,
+                ..Default::default()
+            };
             let duplicate = tokio::time::timeout(
                 Duration::from_secs(5),
-                IrohNodeBuilder::bind(&identity_store, config.clone()),
+                IrohNodeBuilder::bind(&second_identity_store, second_config),
             )
             .await
-            .expect("concurrent production bind exceeded 5 seconds");
-            assert!(matches!(duplicate, Err(IrohNodeError::AlreadyRunning)));
+            .expect("concurrent production bind exceeded 5 seconds")
+            .expect("independent production node should bind while the first is live");
+            tokio::time::timeout(Duration::from_secs(30), duplicate.spawn().shutdown())
+                .await
+                .expect("second production node shutdown exceeded 30 seconds");
         }
 
-        let identity = identity_store
+        let identity = primary_identity_store
             .get_current_fingerprint()
             .await
             .expect("read persistent identity")
@@ -95,4 +103,35 @@ async fn production_node_restarts_ten_times_with_stable_identity_and_released_po
             .expect("shutdown must release the fixed UDP port");
         drop(released);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_nodes_reject_conflicting_lan_only_policies() {
+    let primary_identity_store = identity_store();
+    let primary_config = IrohNodeConfig {
+        disable_relays: true,
+        ..Default::default()
+    };
+    let primary = IrohNodeBuilder::bind(&primary_identity_store, primary_config)
+        .await
+        .expect("bind primary production node");
+
+    let second_identity_store = identity_store();
+    let conflicting_config = IrohNodeConfig {
+        disable_relays: false,
+        ..Default::default()
+    };
+    let error = match IrohNodeBuilder::bind(&second_identity_store, conflicting_config).await {
+        Ok(_) => panic!("conflicting process-wide network policy must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        uc_infra::network::iroh::IrohNodeError::RuntimePolicyConflict {
+            active_lan_only: true,
+            requested_lan_only: false,
+        }
+    ));
+
+    primary.spawn().shutdown().await;
 }
