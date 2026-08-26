@@ -76,6 +76,42 @@ pub struct OhLocalDevice {
 }
 
 #[napi(object)]
+pub struct OhContentTypes {
+    pub text: bool,
+    pub image: bool,
+    pub link: bool,
+    pub file: bool,
+    pub code_snippet: bool,
+    pub rich_text: bool,
+}
+
+#[napi(object)]
+pub struct OhContentTypesPatch {
+    pub text: Option<bool>,
+    pub image: Option<bool>,
+    pub link: Option<bool>,
+    pub file: Option<bool>,
+    pub code_snippet: Option<bool>,
+    pub rich_text: Option<bool>,
+}
+
+#[napi(object)]
+pub struct OhMemberSyncPreferences {
+    pub send_enabled: bool,
+    pub receive_enabled: bool,
+    pub send_content_types: OhContentTypes,
+    pub receive_content_types: OhContentTypes,
+}
+
+#[napi(object)]
+pub struct OhMemberSyncPreferencesPatch {
+    pub send_enabled: Option<bool>,
+    pub receive_enabled: Option<bool>,
+    pub send_content_types: Option<OhContentTypesPatch>,
+    pub receive_content_types: Option<OhContentTypesPatch>,
+}
+
+#[napi(object)]
 pub struct OhWorkspaceConvergence {
     pub phase: String,
     pub revision: f64,
