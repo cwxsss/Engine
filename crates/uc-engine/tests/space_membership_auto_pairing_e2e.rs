@@ -539,6 +539,92 @@ async fn sponsor_pairs_two_devices_sequentially_without_reset() {
 }
 
 // 场景流程：
+// 1. Sponsor 创建空间，Joiner 通过真实邀请加入，并保存双方稳定设备 ID 与 profile 标记。
+// 2. 双方正常停止后从原 profile 重启并恢复，不重置空间或重新配对。
+// 3. 成员关系收敛后，Joiner 与 Sponsor 双向发送唯一文本并由接收端持久历史确认。
+// 验证：恢复后的 Sponsor 仍接纳原 Joiner 的认证剪贴板帧，双方身份没有被重建。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn restarted_sponsor_accepts_clipboard_from_recovered_joiner() {
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let sponsor_profile = DeviceHarness::new(rendezvous.uri());
+    let joiner_profile = DeviceHarness::new(rendezvous.uri());
+
+    let sponsor = sponsor_profile.start().await;
+    let joiner = joiner_profile.start().await;
+    let (space_id, sponsor_id) = create_space(&sponsor, "Sponsor").await;
+    let joiner_id = join_through(&sponsor, &joiner, "Joiner", &space_id).await;
+    wait_for_converged_members_with_diagnostics(
+        "sponsor and joiner after initial admission",
+        &sponsor,
+        &joiner,
+    )
+    .await;
+    let sponsor_profile_marker = sponsor_profile.profile_lifecycle_marker();
+    let joiner_profile_marker = joiner_profile.profile_lifecycle_marker();
+
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down sponsor before admission recovery");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shut down joiner before admission recovery");
+
+    let sponsor = sponsor_profile.start().await;
+    let joiner = joiner_profile.start().await;
+    recover(&sponsor).await;
+    recover(&joiner).await;
+    wait_for_converged_members_with_diagnostics(
+        "sponsor and joiner after both recover",
+        &sponsor,
+        &joiner,
+    )
+    .await;
+
+    assert_eq!(
+        device_trust_summary(&sponsor).await.local_device_id,
+        sponsor_id
+    );
+    assert_eq!(
+        device_trust_summary(&joiner).await.local_device_id,
+        joiner_id
+    );
+
+    let joiner_to_sponsor = format!(
+        "recovered joiner to restarted sponsor {}",
+        uuid::Uuid::new_v4()
+    );
+    send_and_verify(&joiner, &sponsor, &sponsor_id, &joiner_to_sponsor).await;
+    let sponsor_to_joiner = format!(
+        "restarted sponsor to recovered joiner {}",
+        uuid::Uuid::new_v4()
+    );
+    send_and_verify(&sponsor, &joiner, &joiner_id, &sponsor_to_joiner).await;
+
+    assert_eq!(
+        sponsor_profile.profile_lifecycle_marker(),
+        sponsor_profile_marker,
+        "sponsor profile must not be reset or recreated"
+    );
+    assert_eq!(
+        joiner_profile.profile_lifecycle_marker(),
+        joiner_profile_marker,
+        "joiner profile must not be reset or recreated"
+    );
+
+    sponsor
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("final recovered sponsor shutdown");
+    joiner
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("final recovered joiner shutdown");
+}
+
+// 场景流程：
 // 1. A 创建空间，B 加入并保存 A、B 的完整成员记录。
 // 2. A 离线后，仍在线的 B 让 C 加入；C 必须保存 A、B、C 的完整成员记录。
 // 3. B 再离线，A 恢复后必须能与 C 重新互认并双向传递内容。
