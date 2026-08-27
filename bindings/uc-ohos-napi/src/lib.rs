@@ -70,6 +70,12 @@ pub struct OhNetworkRecoveryStatus {
 }
 
 #[napi(object)]
+pub struct OhNetworkSettings {
+    pub allow_relay_fallback: bool,
+    pub custom_relay_urls: Vec<String>,
+}
+
+#[napi(object)]
 pub struct OhLocalDevice {
     pub device_id: String,
     pub display_name: String,

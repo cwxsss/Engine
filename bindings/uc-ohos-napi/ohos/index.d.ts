@@ -63,6 +63,11 @@ export interface OhNetworkRecoveryStatus {
   nextRetryInMs?: number
 }
 
+export interface OhNetworkSettings {
+  allowRelayFallback: boolean
+  customRelayUrls: string[]
+}
+
 export interface OhLocalDevice {
   deviceId: string
   displayName: string
@@ -185,6 +190,9 @@ export interface OhEngine {
   recoverSession(allowSecureStorageUnlock: boolean): Promise<OhSessionRecovery>
   recoverNetwork(): Promise<void>
   queryNetworkRecoveryStatus(): Promise<OhNetworkRecoveryStatus>
+  queryNetworkSettings(): Promise<OhNetworkSettings>
+  updateNetworkSettings(allowRelayFallback: boolean, customRelayUrls: string[]): Promise<OhNetworkSettings>
+  probeRelayUrl(url: string): Promise<number>
   queryLocalDevice(): Promise<OhLocalDevice>
   queryMemberSyncPreferences(deviceId: string): Promise<OhMemberSyncPreferences>
   updateMemberSyncPreferences(deviceId: string, patch: OhMemberSyncPreferencesPatch): Promise<OhMemberSyncPreferences>
