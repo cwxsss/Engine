@@ -71,11 +71,15 @@ enum ProbeCommand {
     SendImage {
         bytes_base64: String,
         mime_type: String,
+        #[serde(default)]
+        target_devices: Vec<String>,
     },
     SendFile {
         path: String,
         display_name: String,
         mime_type: Option<String>,
+        #[serde(default)]
+        target_devices: Vec<String>,
     },
     QueryHistory {
         query: Option<String>,
@@ -470,6 +474,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
         ProbeCommand::SendImage {
             bytes_base64,
             mime_type,
+            target_devices,
         } => match base64::engine::general_purpose::STANDARD.decode(bytes_base64) {
             Ok(bytes) => {
                 execute_operation(
@@ -477,7 +482,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                     Operation::SendImage(SendImageInput {
                         bytes,
                         mime_type,
-                        target_devices: Vec::new(),
+                        target_devices,
                     }),
                 )
                 .await
@@ -488,6 +493,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             path,
             display_name,
             mime_type,
+            target_devices,
         } => {
             let handle = state
                 .files
@@ -496,7 +502,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 state,
                 Operation::SendFiles(SendFilesInput {
                     files: vec![handle],
-                    target_devices: Vec::new(),
+                    target_devices,
                 }),
             )
             .await

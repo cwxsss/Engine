@@ -7,8 +7,9 @@ use uc_application::facade::{
     ClipboardHostEvent, ClipboardLiveIndexInput, ClipboardLiveIndexOutcome, ClipboardOriginKind,
     ClipboardOutboundInput, HostEvent, HostEventBus,
 };
+use uc_core::clipboard::ClipboardEntryContentCategory;
 use uc_core::ports::{SelfWriteLedgerPort, SystemClipboardPort};
-use uc_core::{ClipboardChangeOrigin, TaskRegistry};
+use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot, TaskRegistry};
 
 use super::host_operations::send_report_summary;
 use super::operation_error_with_code;
@@ -182,11 +183,22 @@ impl HostClipboardChangeRuntime {
             }
         }
 
-        let dispatch_snapshot =
-            Arc::try_unwrap(outbound_snapshot).unwrap_or_else(|shared| (*shared).clone());
-        if dispatch_mode == DispatchMode::CaptureOnly {
+        let content_category =
+            ClipboardEntryContentCategory::from_snapshot(outbound_snapshot.as_ref());
+        if dispatch_mode == DispatchMode::CaptureOnly
+            || !should_automatically_dispatch(outbound_snapshot.as_ref())
+        {
+            if dispatch_mode != DispatchMode::CaptureOnly {
+                tracing::info!(
+                    content_category = content_category.as_label(),
+                    entry_id = %captured.entry_id,
+                    "captured non-text clipboard content without automatic outbound sync"
+                );
+            }
             return Ok(None);
         }
+        let dispatch_snapshot =
+            Arc::try_unwrap(outbound_snapshot).unwrap_or_else(|shared| (*shared).clone());
         let entry_id = captured.entry_id;
         let dispatch = move || async move {
             outbound
@@ -221,6 +233,62 @@ impl HostClipboardChangeRuntime {
     }
 }
 
+fn should_automatically_dispatch(snapshot: &SystemClipboardSnapshot) -> bool {
+    matches!(
+        ClipboardEntryContentCategory::from_snapshot(snapshot),
+        ClipboardEntryContentCategory::Text | ClipboardEntryContentCategory::RichText
+    )
+}
+
 fn observe_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
     operation_error_with_code(OBSERVE_CLIPBOARD_FAILED_CODE, context, error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_automatically_dispatch;
+    use uc_core::ids::{FormatId, RepresentationId};
+    use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
+
+    fn snapshot(format: &str, mime_type: &str, bytes: &[u8]) -> SystemClipboardSnapshot {
+        SystemClipboardSnapshot {
+            ts_ms: 1,
+            representations: vec![ObservedClipboardRepresentation::new(
+                RepresentationId::new(),
+                FormatId::from(format),
+                Some(MimeType(mime_type.to_owned())),
+                bytes.to_vec(),
+            )],
+            file_content_digests: Vec::new(),
+            file_set_v1_component: None,
+        }
+    }
+
+    #[test]
+    fn automatic_dispatch_accepts_text_and_rich_text() {
+        assert!(should_automatically_dispatch(&snapshot(
+            "text/plain",
+            "text/plain",
+            b"text",
+        )));
+        assert!(should_automatically_dispatch(&snapshot(
+            "text/html",
+            "text/html",
+            b"<b>text</b>",
+        )));
+    }
+
+    #[test]
+    fn automatic_dispatch_rejects_images_and_files() {
+        assert!(!should_automatically_dispatch(&snapshot(
+            "image",
+            "image/png",
+            b"png",
+        )));
+        assert!(!should_automatically_dispatch(&snapshot(
+            "files",
+            "text/uri-list",
+            b"file:///tmp/example.txt",
+        )));
+    }
 }

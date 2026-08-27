@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use napi::bindgen_prelude::Buffer;
+use napi::bindgen_prelude::Uint8Array;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
@@ -13,7 +13,7 @@ use uc_engine::{
     OperationTerminal, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
     RelayProbeCredential, RelayProbeInput, RelayProbeOutcome, RemoveMemberInput,
     RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
-    SettingsPatch, SettingsUpdateOutcome, SendTextInput, UpdateMemberSyncPreferencesInput,
+    SendTextInput, SettingsPatch, SettingsUpdateOutcome, UpdateMemberSyncPreferencesInput,
 };
 use zeroize::Zeroizing;
 
@@ -179,7 +179,9 @@ impl OhEngine {
             .await
             .map_err(engine_error)?;
         match result {
-            OperationResult::RelayProbed(RelayProbeOutcome::Success { latency_ms }) => Ok(latency_ms),
+            OperationResult::RelayProbed(RelayProbeOutcome::Success { latency_ms }) => {
+                Ok(latency_ms)
+            }
             OperationResult::RelayProbed(outcome) => Err(relay_probe_error(outcome)),
             _ => Err(unexpected_result()),
         }
@@ -385,7 +387,7 @@ impl OhEngine {
     #[napi]
     pub async fn send_image(
         &self,
-        bytes: Buffer,
+        bytes: Uint8Array,
         mime_type: String,
         target_devices: Vec<String>,
     ) -> napi::Result<OhSendReport> {
@@ -573,7 +575,10 @@ fn relay_probe_error(outcome: RelayProbeOutcome) -> napi::Error {
         RelayProbeOutcome::Timeout => "relay probe timed out".to_owned(),
         RelayProbeOutcome::Success { .. } => "unexpected successful relay probe".to_owned(),
     };
-    napi::Error::new(Status::GenericFailure, format!("relay probe failed: {message}"))
+    napi::Error::new(
+        Status::GenericFailure,
+        format!("relay probe failed: {message}"),
+    )
 }
 
 fn content_types(summary: ContentTypesSummary) -> OhContentTypes {

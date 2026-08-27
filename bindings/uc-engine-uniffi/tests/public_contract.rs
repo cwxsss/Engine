@@ -853,7 +853,11 @@ fn image_send_returns_the_shared_content_free_delivery_summary() {
     let mut private_image = vec![0; 64 * 1024 + 1];
     private_image[..8].copy_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
     let report: SendReport = engine
-        .send_image(private_image.clone(), "image/png".to_owned(), Vec::new())
+        .send_image(
+            private_image.clone(),
+            "image/png".to_owned(),
+            vec!["offline-target".to_owned()],
+        )
         .expect("binding must send an image through the core");
     assert!(!report.entry_id.is_empty());
     assert!(report.at_ms > 0);
@@ -897,7 +901,10 @@ fn file_send_reads_opaque_host_handles_and_returns_the_shared_summary() {
         .expect("binding must create a space");
 
     let report: SendReport = engine
-        .send_files(vec!["input-file-1".to_owned()], Vec::new())
+        .send_files(
+            vec!["input-file-1".to_owned()],
+            vec!["offline-target".to_owned()],
+        )
         .expect("binding must send a host file through the core");
     assert!(!report.entry_id.is_empty());
     assert!(report.at_ms > 0);

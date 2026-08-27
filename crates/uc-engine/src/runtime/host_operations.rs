@@ -65,6 +65,7 @@ impl ProductionRuntime {
         &self,
         input: SendImageInput,
     ) -> Result<OperationResult, EngineError> {
+        let target_devices = explicit_media_targets(input.target_devices)?;
         if !is_valid_image_input(input.bytes.len(), &input.mime_type) {
             return Err(send_invalid_input_error());
         }
@@ -79,7 +80,7 @@ impl ProductionRuntime {
             file_content_digests: Vec::new(),
             file_set_v1_component: None,
         };
-        self.send_snapshot(snapshot, input.target_devices).await
+        self.send_snapshot(snapshot, target_devices).await
     }
 
     pub(super) async fn execute_send_files(
@@ -87,6 +88,7 @@ impl ProductionRuntime {
         input: SendFilesInput,
         cancellation: &CancellationToken,
     ) -> Result<OperationResult, EngineError> {
+        let target_devices = explicit_media_targets(input.target_devices)?;
         if input.files.is_empty() {
             return Err(send_invalid_input_error());
         }
@@ -133,7 +135,7 @@ impl ProductionRuntime {
             file_content_digests: Vec::new(),
             file_set_v1_component: None,
         };
-        self.send_snapshot(snapshot, input.target_devices).await
+        self.send_snapshot(snapshot, target_devices).await
     }
 
     pub(super) async fn execute_export_entry(
@@ -269,6 +271,18 @@ impl ProductionRuntime {
 
 fn is_valid_image_input(byte_len: usize, mime_type: &str) -> bool {
     byte_len > 0 && byte_len <= MAX_IMAGE_BYTES && mime_type.starts_with("image/")
+}
+
+fn explicit_media_targets(target_devices: Vec<String>) -> Result<Vec<String>, EngineError> {
+    let target_devices = target_devices
+        .into_iter()
+        .map(|device_id| device_id.trim().to_owned())
+        .filter(|device_id| !device_id.is_empty())
+        .collect::<Vec<_>>();
+    if target_devices.is_empty() {
+        return Err(send_invalid_input_error());
+    }
+    Ok(target_devices)
 }
 
 pub(super) fn send_report_result(

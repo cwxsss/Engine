@@ -145,13 +145,13 @@ async function main() {
     assert.equal(report.totalPending, 0);
 
     const privateImage = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-    const imageReport = await engine.sendImage(privateImage, 'image/png', []);
+    const imageReport = await engine.sendImage(privateImage, 'image/png', ['offline-target']);
     assert.ok(imageReport.entryId);
     assert.ok(imageReport.atMs > 0);
     assert.equal(imageReport.totalAccepted, 0);
     assert.equal(imageReport.totalPending, 0);
 
-    const fileReport = await engine.sendFiles(['input-file-1'], []);
+    const fileReport = await engine.sendFiles(['input-file-1'], ['offline-target']);
     assert.ok(fileReport.entryId);
     assert.ok(fileReport.atMs > 0);
     assert.equal(fileReport.totalAccepted, 0);

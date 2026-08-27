@@ -2598,7 +2598,7 @@ async fn engine_start_builds_a_resumable_real_session() {
         .execute(crate::Operation::SendImage(crate::SendImageInput {
             bytes: vec![0; 64 * 1024 + 1],
             mime_type: "image/png".into(),
-            target_devices: Vec::new(),
+            target_devices: vec!["offline-target".into()],
         }))
         .await
         .expect("images above the inline threshold must use blob transfer");
@@ -2635,7 +2635,7 @@ async fn engine_start_builds_a_resumable_real_session() {
         .execute(crate::Operation::SendImage(crate::SendImageInput {
             bytes: vec![137, 80, 78, 71],
             mime_type: "image/png".into(),
-            target_devices: Vec::new(),
+            target_devices: vec!["offline-target".into()],
         }))
         .await
         .unwrap();
@@ -3938,7 +3938,7 @@ async fn engine_send_files_imports_opaque_content_and_exports_after_resume() {
     let sent = engine
         .execute(crate::Operation::SendFiles(crate::SendFilesInput {
             files: vec![HostFileHandle::new("picked-file")],
-            target_devices: Vec::new(),
+            target_devices: vec!["offline-target".into()],
         }))
         .await
         .unwrap();
@@ -4317,7 +4317,7 @@ async fn persisted_engine_text_image_preview_and_logs_do_not_leave_plaintext_on_
         .execute(crate::Operation::SendImage(crate::SendImageInput {
             bytes: probe.as_bytes().to_vec(),
             mime_type: "image/png".into(),
-            target_devices: Vec::new(),
+            target_devices: vec!["offline-target".into()],
         }))
         .await
         .unwrap();
