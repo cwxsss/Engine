@@ -61,11 +61,9 @@ else
   ohos_cflags=""
   ohos_rustflags="${RUSTFLAGS:-}"
 fi
-library_dir="$project_root/entry/libs/$ohos_arch"
 har_root="$project_root/engine"
 har_library_dir="$har_root/libs/$ohos_arch"
 declaration_source="$workspace_root/bindings/uc-ohos-napi/ohos/index.d.ts"
-entry_declaration_dir="$project_root/entry/src/main/cpp/types/libuc_ohos_napi"
 har_declaration_dir="$har_root/src/main/cpp/types/libuc_ohos_napi"
 dist_dir="${UC_OHOS_DIST_DIR:-$target_dir/uc-ohos-napi-dist/ohos}"
 debug_dir="$(dirname "$dist_dir")/debug-symbols/ohos"
@@ -93,16 +91,12 @@ CMAKE="$cmake" \
     --target "$target" \
     --locked
 
-mkdir -p "$library_dir" "$har_library_dir" "$entry_declaration_dir" "$har_declaration_dir"
-cp "$target_dir/$target/debug/libuc_ohos_napi.so" "$library_dir/libuc_ohos_napi.so"
+mkdir -p "$har_library_dir" "$har_declaration_dir"
 cp "$target_dir/$target/debug/libuc_ohos_napi.so" "$har_library_dir/libuc_ohos_napi.so"
-cp "$declaration_source" "$entry_declaration_dir/index.d.ts"
 cp "$declaration_source" "$har_declaration_dir/index.d.ts"
-cp "$entry_declaration_dir/oh-package.json5" "$har_declaration_dir/oh-package.json5"
-cp "$entry_declaration_dir/package.json" "$har_declaration_dir/package.json"
 mkdir -p "$dist_dir" "$debug_dir"
-cp "$library_dir/libuc_ohos_napi.so" "$dist_dir/libuc_ohos_napi.so"
-cp "$library_dir/libuc_ohos_napi.so" "$debug_dir/$ohos_arch.so"
+cp "$har_library_dir/libuc_ohos_napi.so" "$dist_dir/libuc_ohos_napi.so"
+cp "$har_library_dir/libuc_ohos_napi.so" "$debug_dir/$ohos_arch.so"
 cp "$declaration_source" "$dist_dir/index.d.ts"
 sha256_file "$dist_dir/libuc_ohos_napi.so" > "$dist_dir/uc-ohos-napi.checksum.txt"
 version="$(cargo pkgid --manifest-path "$workspace_root/Cargo.toml" -p uc-ohos-napi)"
@@ -123,17 +117,6 @@ DEVECO_SDK_HOME="$sdk_root" \
   "$deveco_contents/tools/hvigor/bin/hvigorw" \
   --mode module \
   -p product=default \
-  -p module=entry@default \
-  -p buildMode=debug \
-  assembleHap \
-  --no-daemon
-
-"$project_root/sign-emulator.sh"
-
-DEVECO_SDK_HOME="$sdk_root" \
-  "$deveco_contents/tools/hvigor/bin/hvigorw" \
-  --mode module \
-  -p product=default \
   -p module=engine@default \
   -p buildMode=release \
   assembleHar \
@@ -145,12 +128,20 @@ if [[ -z "$har_path" ]]; then
   exit 1
 fi
 cp "$har_path" "$dist_dir/UniClipboardEngine.har"
-cp "$project_root/entry/build/default/outputs/default/entry-default-signed.hap" \
-  "$dist_dir/UniClipboardEngineProbe.hap"
 
+required_arches=("$ohos_arch")
+if [[ "${UC_OHOS_REQUIRE_BOTH:-0}" == "1" ]]; then
+  required_arches=(arm64-v8a x86_64)
+fi
+for architecture in "${required_arches[@]}"; do
+  required_path="package/libs/$architecture/libuc_ohos_napi.so"
+  if ! tar -tzf "$dist_dir/UniClipboardEngine.har" | grep -Fxq "$required_path"; then
+    echo "HarmonyOS HAR is missing $required_path" >&2
+    exit 1
+  fi
+done
 for required_path in \
   package/Index.d.ets \
-  package/libs/arm64-v8a/libuc_ohos_napi.so \
   package/oh-package.json5 \
   package/src/main/cpp/types/libuc_ohos_napi/index.d.ts; do
   if ! tar -tzf "$dist_dir/UniClipboardEngine.har" | grep -Fxq "$required_path"; then
@@ -171,7 +162,5 @@ if ! tar -xOzf "$dist_dir/UniClipboardEngine.har" package/oh-package.json5 \
 fi
 
 sha256_file "$dist_dir/UniClipboardEngine.har" > "$dist_dir/UniClipboardEngine.har.checksum.txt"
-sha256_file "$dist_dir/UniClipboardEngineProbe.hap" > "$dist_dir/UniClipboardEngineProbe.checksum.txt"
 
 echo "OK: $dist_dir/UniClipboardEngine.har"
-echo "OK: $dist_dir/UniClipboardEngineProbe.hap"

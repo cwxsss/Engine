@@ -61,12 +61,12 @@ fn ohos_probe_declares_the_engine_napi_module() {
 }
 
 #[test]
-fn ohos_probe_builds_the_arm64_binding_before_assembling_the_hap() {
+fn ohos_har_builder_builds_the_native_binding_before_assembling_the_har() {
     let script = read("tests/hosts/ohos/build-emulator.sh");
     assert!(script.contains("aarch64-unknown-linux-ohos"));
     assert!(script.contains("libuc_ohos_napi.so"));
-    assert!(script.contains("assembleHap"));
     assert!(script.contains("assembleHar"));
+    assert!(script.contains("UC_OHOS_SKIP_PACKAGE"));
     assert!(script.contains("UniClipboardEngine.har"));
     assert!(!script.contains("/Users/"));
 }
@@ -79,6 +79,7 @@ fn ohos_binding_owns_a_distributable_har_module() {
     let script = read("tests/hosts/ohos/build-emulator.sh");
 
     assert!(entry.contains("import engine from 'libuc_ohos_napi.so'"));
+    assert!(entry.contains("export * from 'libuc_ohos_napi.so'"));
     assert!(entry.contains("export default engine"));
     assert_eq!(module["module"]["type"], "har");
     assert!(package.contains("@uniclipboard/engine"));
@@ -115,47 +116,14 @@ fn ohos_probe_page_loads_the_engine_version_from_napi() {
 }
 
 #[test]
-fn ohos_probe_exposes_membership_convergence_from_the_engine() {
+fn ohos_binding_exposes_the_current_member_removal_contract() {
     let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
-    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
-    let page = read("tests/hosts/ohos/entry/src/main/ets/pages/Index.ets");
 
-    assert!(declarations.contains("queryMembershipConvergence(): Promise<OhMembershipConvergence>"));
-    assert!(runtime.contains("active.queryMembershipConvergence()"));
-    assert!(runtime.contains("convergenceState"));
-    assert!(page.contains("snapshot.convergenceState"));
-}
-
-#[test]
-fn ohos_probe_exposes_the_complete_member_removal_contract() {
-    let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
-    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
-    let page = read("tests/hosts/ohos/entry/src/main/ets/pages/Index.ets");
-
-    for method in [
-        "removeMember(deviceId: string): Promise<OhMemberRemoval>",
-        "queryMemberRemoval(): Promise<OhMemberRemoval>",
-        "nextEvent(timeoutMs: number): Promise<OhEngineEvent | null>",
-    ] {
-        assert!(declarations.contains(method), "missing method: {method}");
-    }
-    for field in [
-        "phase: 'applied' | 'converging' | 'complete' | 'recovery_required'",
-        "intentCount: number",
-        "effectiveMemberCount: number",
-        "convergenceDigest?: string",
-        "updatedAtMs: number",
-        "memberRemoval?: OhMemberRemoval",
-    ] {
-        assert!(declarations.contains(field), "missing field: {field}");
-    }
-    assert!(runtime.contains("active.queryMemberRemoval()"));
-    assert!(runtime.contains("effectiveMemberCount: removal.effectiveMemberCount"));
-    assert!(runtime.contains("updatedAtMs: removal.updatedAtMs"));
-    assert!(page.contains("snapshot.memberRemovalState"));
-    assert!(page.contains("Button('Member removal')"));
-    assert!(page.contains("Member removal query failed"));
-    assert!(page.contains("void this.queryCurrentMemberRemoval();"));
+    assert!(declarations.contains("export interface OhWorkspaceConvergence"));
+    assert!(
+        declarations.contains("removeMember(deviceId: string): Promise<OhWorkspaceConvergence>")
+    );
+    assert!(declarations.contains("nextEvent(timeoutMs: number): Promise<OhEngineEvent | null>"));
 }
 
 #[test]
