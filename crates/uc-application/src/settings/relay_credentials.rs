@@ -283,7 +283,7 @@ impl RelayCredentials {
         previous_urls: &[String],
         current_urls: &[String],
         edit: Option<&RelayCredentialEdit>,
-    ) -> Result<(), RelayCredentialsError> {
+    ) -> Result<bool, RelayCredentialsError> {
         let current_keys = current_urls
             .iter()
             .map(|url| storage_key(url))
@@ -335,6 +335,9 @@ impl RelayCredentials {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         };
+        if mutations.is_empty() {
+            return Ok(false);
+        }
         self.write_settings_transaction(previous_settings, &restore_point)?;
 
         for (index, (_, (relay_url, mutation))) in mutations.iter().enumerate() {
@@ -349,7 +352,7 @@ impl RelayCredentials {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) fn restore_pending_settings_transaction(
@@ -476,9 +479,15 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use uc_core::ports::{SecureStorageError, SecureStoragePort};
+    use uc_core::{
+        ports::{SecureStorageError, SecureStoragePort},
+        settings::model::Settings,
+    };
 
-    use super::{storage_key, RelayAccessToken, RelayCredentials, RelayCredentialsError};
+    use super::{
+        storage_key, RelayAccessToken, RelayCredentials, RelayCredentialsError,
+        SETTINGS_TRANSACTION_STORAGE_KEY,
+    };
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
@@ -504,6 +513,26 @@ mod tests {
             self.values.lock().unwrap().remove(key);
             Ok(())
         }
+    }
+
+    #[test]
+    fn url_only_change_does_not_create_a_recovery_transaction() {
+        let storage = Arc::new(InMemorySecureStorage::default());
+        let credentials = RelayCredentials::new(Arc::clone(&storage) as Arc<dyn SecureStoragePort>);
+        let started = credentials
+            .begin_settings_transaction(
+                &Settings::default(),
+                &[],
+                &["https://relay.example.com".to_string()],
+                None,
+            )
+            .expect("URL-only changes do not need a credential transaction");
+
+        assert!(!started);
+        assert!(storage
+            .get(SETTINGS_TRANSACTION_STORAGE_KEY)
+            .expect("query recovery transaction")
+            .is_none());
     }
 
     #[test]

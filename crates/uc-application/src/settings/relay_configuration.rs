@@ -85,15 +85,13 @@ impl RelayConfiguration {
         };
 
         let transaction_started = match credentials.as_ref() {
-            Some(credentials) if relay_urls_changed || edit.is_some() => {
-                credentials.begin_settings_transaction(
+            Some(credentials) if relay_urls_changed || edit.is_some() => credentials
+                .begin_settings_transaction(
                     &existing,
                     &previous_relay_urls,
                     &merged.network.custom_relay_urls,
                     edit,
-                )?;
-                true
-            }
+                )?,
             Some(_) => false,
             None if edit.is_some() => return Err(RelayConfigurationError::CredentialsUnavailable),
             None => false,
