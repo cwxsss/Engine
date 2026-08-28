@@ -717,9 +717,9 @@ async fn store_only_pull_persists_without_a_clipboard_write_dependency() {
     assert_eq!(live_index.calls.load(Ordering::SeqCst), 1);
 }
 
-fn fixture_input(text: &str) -> (ApplyInboundInput, String) {
+fn fixture_input_at(text: &str, ts_ms: i64) -> (ApplyInboundInput, String) {
     let snapshot = SystemClipboardSnapshot {
-        ts_ms: 1_700_000_000_000,
+        ts_ms,
         representations: vec![ObservedClipboardRepresentation::new(
             RepresentationId::new(),
             FormatId::from("text"),
@@ -740,6 +740,10 @@ fn fixture_input(text: &str) -> (ApplyInboundInput, String) {
         },
         snapshot_hash,
     )
+}
+
+fn fixture_input(text: &str) -> (ApplyInboundInput, String) {
+    fixture_input_at(text, 1_700_000_000_000)
 }
 
 #[test]
@@ -1246,7 +1250,10 @@ async fn visible_duplicate_skipped_across_channel_representation_expansion() {
         }
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    // This is intentionally beyond the old two-second window: the observed
+    // Windows rich-text rewrite arrived roughly five seconds after the first
+    // snapshot.
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
 
     let second = uc
         .execute(second_input)
@@ -1311,7 +1318,10 @@ async fn visible_duplicate_window_expires() {
         "first visible content applies"
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    tokio::time::sleep(
+        super::timing::VISIBLE_DUPLICATE_WINDOW + std::time::Duration::from_millis(100),
+    )
+    .await;
 
     assert!(
         matches!(
@@ -3756,6 +3766,10 @@ async fn rapid_re_delivery_of_held_entry_resurfaces_only_once() {
     let first = uc.execute(input.clone()).await.expect("first ok");
     assert!(matches!(first, ApplyOutcome::Resurfaced { .. }));
 
+    // The active-state path can resend the same activation after the old
+    // 200 ms hash-only guard has expired. The activation timestamp keeps that
+    // physical copy idempotent without blocking a new copy with a new stamp.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let second = uc.execute(input).await.expect("second ok");
     assert!(
         matches!(second, ApplyOutcome::DuplicateSkipped { .. }),
@@ -3768,6 +3782,7 @@ async fn rapid_re_delivery_of_held_entry_resurfaces_only_once() {
 #[tokio::test]
 async fn repeat_copy_after_window_resurfaces_again() {
     let (input, _hash) = fixture_input("abc");
+    let (second_input, _second_hash) = fixture_input_at("abc", 1_700_000_000_301);
 
     let mut repo = MockEntryRepo::new();
     repo.expect_find_entry_id_by_snapshot_hash()
@@ -3806,7 +3821,7 @@ async fn repeat_copy_after_window_resurfaces_again() {
     // visible-window test waits it out.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let second = uc.execute(input).await.expect("second ok");
+    let second = uc.execute(second_input).await.expect("second ok");
     assert!(
         matches!(second, ApplyOutcome::Resurfaced { .. }),
         "a deliberate repeat copy must re-activate, got {second:?}"

@@ -47,10 +47,11 @@ pub(crate) const RAPID_DUPLICATE_WINDOW: Duration = Duration::from_millis(200);
 /// `snapshot_hash` (e.g. a peer re-sending with extended representations) is
 /// collapsed to one logical clip within this interval.
 ///
-/// Sized to a human re-copy window — long enough to absorb a peer's re-send of
-/// the same thing the user just saw, short enough not to merge a genuinely new
-/// copy of similar content.
-pub(crate) const VISIBLE_DUPLICATE_WINDOW: Duration = Duration::from_secs(2);
+/// Sized to absorb delayed representation rewrites and peer re-sends observed
+/// in the wild — long enough to collapse one logical copy even when the next
+/// representation arrives several seconds later, short enough not to merge a
+/// genuinely new copy of similar content.
+pub(crate) const VISIBLE_DUPLICATE_WINDOW: Duration = Duration::from_secs(15);
 
 #[cfg(test)]
 mod tests {
@@ -61,6 +62,6 @@ mod tests {
     #[test]
     fn dedup_windows_are_pinned() {
         assert_eq!(RAPID_DUPLICATE_WINDOW, Duration::from_millis(200));
-        assert_eq!(VISIBLE_DUPLICATE_WINDOW, Duration::from_secs(2));
+        assert_eq!(VISIBLE_DUPLICATE_WINDOW, Duration::from_secs(15));
     }
 }

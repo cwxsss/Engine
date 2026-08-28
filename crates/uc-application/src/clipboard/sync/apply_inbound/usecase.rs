@@ -69,6 +69,12 @@ pub struct ApplyInboundClipboardUseCase {
     /// content, different `snapshot_hash`" (a peer re-sending with extended
     /// representations). TTL = `VISIBLE_DUPLICATE_WINDOW` (see [`super::timing`]).
     recent_visible_content: Cache<String, EntryId>,
+    /// Inbound activation idempotency, `(snapshot_hash, activated_at_ms)` ->
+    /// `entry_id`: suppresses the same held-entry activation being resurfaced
+    /// repeatedly by a periodic active-state resend while allowing a genuine
+    /// re-copy of identical bytes, which carries a new activation timestamp.
+    /// TTL = `VISIBLE_DUPLICATE_WINDOW` (see [`super::timing`]).
+    recent_resurface_activations: Cache<String, EntryId>,
     /// Serializes "find entry by content hash → create / replace / skip" across
     /// every writer of the same content (the two inbound channels here and
     /// local capture). Production modes receive the shared coordinator during
@@ -279,6 +285,10 @@ impl ApplyInboundClipboardUseCase {
                 .max_capacity(RECENT_INBOUND_MAX_RECORDS)
                 .time_to_live(VISIBLE_DUPLICATE_WINDOW)
                 .build(),
+            recent_resurface_activations: Cache::builder()
+                .max_capacity(RECENT_INBOUND_MAX_RECORDS)
+                .time_to_live(VISIBLE_DUPLICATE_WINDOW)
+                .build(),
         }
     }
 
@@ -313,6 +323,10 @@ impl ApplyInboundClipboardUseCase {
                 .time_to_live(RAPID_DUPLICATE_WINDOW)
                 .build(),
             recent_visible_content: Cache::builder()
+                .max_capacity(RECENT_INBOUND_MAX_RECORDS)
+                .time_to_live(VISIBLE_DUPLICATE_WINDOW)
+                .build(),
+            recent_resurface_activations: Cache::builder()
                 .max_capacity(RECENT_INBOUND_MAX_RECORDS)
                 .time_to_live(VISIBLE_DUPLICATE_WINDOW)
                 .build(),
@@ -516,6 +530,10 @@ impl ApplyInboundClipboardUseCase {
         if let Some(visible_key) = visible_key {
             self.recent_visible_content.insert(visible_key, entry_id);
         }
+    }
+
+    fn resurface_activation_key(snapshot_hash: &str, activated_at_ms: i64) -> String {
+        format!("{snapshot_hash}:{activated_at_ms}")
     }
 
     /// Whether `entry_id` is fully held locally. With no availability port
@@ -768,6 +786,22 @@ impl ApplyInboundClipboardUseCase {
             };
         };
 
+        let activation_key = Self::resurface_activation_key(&input.snapshot_hash, activated_at_ms);
+        if self
+            .recent_resurface_activations
+            .get(&activation_key)
+            .is_some()
+        {
+            debug!(
+                existing_entry_id = %existing_id,
+                "inbound dropped: repeated active activation of held entry"
+            );
+            return ApplyOutcome::DuplicateSkipped {
+                snapshot_hash: input.snapshot_hash.clone(),
+                existing_entry_id: existing_id.clone(),
+            };
+        }
+
         // A re-activation this recent is the same logical delivery arriving
         // twice (a retried frame, or one clip reaching us over both the direct
         // dispatch and the active-state channel) — not the user copying the
@@ -833,6 +867,8 @@ impl ApplyInboundClipboardUseCase {
         // retries / second channel. Only recorded once the write landed, so a
         // failed re-activation stays retryable.
         self.remember_recent_inbound(input.snapshot_hash.clone(), None, existing_id.clone());
+        self.recent_resurface_activations
+            .insert(activation_key, existing_id.clone());
 
         self.advance_active_register(
             input.snapshot_hash.clone(),
@@ -1258,6 +1294,17 @@ impl ApplyInboundClipboardUseCase {
                     has_receive_artifacts,
                 )
                 .await?;
+                // Refresh both keys when a duplicate is observed. A peer can
+                // resend a rich-text representation several seconds later;
+                // keeping the visible-content TTL alive collapses that whole
+                // physical copy without making the cache permanent.
+                if !is_partial {
+                    self.remember_recent_inbound(
+                        input.snapshot_hash.clone(),
+                        visible_key.clone(),
+                        existing_entry_id.clone(),
+                    );
+                }
                 return Ok(ApplyOutcome::DuplicateSkipped {
                     snapshot_hash: input.snapshot_hash,
                     existing_entry_id,
