@@ -76,6 +76,28 @@ pub struct OhNetworkSettings {
 }
 
 #[napi(object)]
+pub struct OhPairingCandidateDiagnostic {
+    pub kind: String,
+    pub address_hint: String,
+    pub port: u32,
+}
+
+#[napi(object)]
+pub struct OhPairingInboundDiagnostics {
+    pub events_delivered: u32,
+    pub last_stage: String,
+    pub last_stage_elapsed_ms: f64,
+    pub last_failure: Option<String>,
+}
+
+#[napi(object)]
+pub struct OhPairingDiagnostics {
+    pub candidate_count: u32,
+    pub candidates: Vec<OhPairingCandidateDiagnostic>,
+    pub inbound: OhPairingInboundDiagnostics,
+}
+
+#[napi(object)]
 pub struct OhLocalDevice {
     pub device_id: String,
     pub display_name: String,

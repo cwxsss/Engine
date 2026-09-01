@@ -44,6 +44,9 @@ use crate::facade::space_setup::errors::{
 use crate::facade::space_setup::errors::{
     InitializeSpaceError, IssuePairingInvitationError, TryResumeSessionError, UnlockSpaceError,
 };
+use crate::facade::space_setup::pairing_diagnostics::{
+    redact_invitation_candidate, PairingDiagnosticsView,
+};
 use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
 use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
 use crate::space::admission::issue_invitation::IssuePairingInvitationUseCase;
@@ -315,6 +318,8 @@ pub struct SpaceFacade {
     /// spawned during construction. Aborted in [`Self::on_shutdown`] so
     /// the event loop doesn't outlive the facade.
     pairing_inbound_handle: JoinHandle<()>,
+    pairing_diagnostics:
+        Arc<crate::space::admission::sponsor::orchestrator::PairingInboundDiagnostics>,
     /// Held for [`Self::try_resume_session`] — the silent resume path needs
     /// both the setup flag (to decide whether there's anything to resume at
     /// all) and direct access to [`ResumeSpaceSessionPort::try_resume_session`].
@@ -540,6 +545,7 @@ impl SpaceFacade {
             Arc::clone(&workspace_convergence) as Arc<dyn WorkspaceAdmissionOwnerPort>,
             Arc::clone(&analytics),
         ));
+        let pairing_diagnostics = inbound_orchestrator.diagnostics();
         let pairing_inbound_handle = inbound_orchestrator.spawn();
 
         // joiner-side symmetric: coordinator holds wire + crypto, use
@@ -569,6 +575,7 @@ impl SpaceFacade {
             issue_pairing_invitation,
             redeem_pairing_invitation,
             pairing_inbound_handle,
+            pairing_diagnostics,
             resume_session: resume_session_for_facade,
             factory_reset: factory_reset_for_facade,
             relationship_reset: relationship_reset_for_facade,
@@ -719,6 +726,21 @@ impl SpaceFacade {
         &self,
     ) -> Result<Vec<PairingInvitationAddressCandidate>, IssuePairingInvitationError> {
         self.issue_pairing_invitation.list_addresses().await
+    }
+
+    /// Return transient sponsor-side pairing state without exposing secrets.
+    pub async fn pairing_diagnostics(&self) -> PairingDiagnosticsView {
+        let candidates = self
+            .list_pairing_invitation_addresses()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|candidate| redact_invitation_candidate(candidate.ip, candidate.port))
+            .collect();
+        PairingDiagnosticsView {
+            candidates,
+            inbound: self.pairing_diagnostics.snapshot(),
+        }
     }
 
     /// B2 · Redeem a sponsor-issued invitation (joiner side).

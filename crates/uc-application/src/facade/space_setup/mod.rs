@@ -13,6 +13,7 @@ pub(crate) mod commands;
 mod deps;
 mod errors;
 mod facade;
+mod pairing_diagnostics;
 
 pub use commands::{
     CurrentInvitation, InitializeSpaceInput, InitializeSpaceResult, InvitationAvailability,
@@ -26,6 +27,9 @@ pub use errors::{
     UnlockSpaceError,
 };
 pub use facade::{PairingInvitationRuntime, SpaceFacade};
+pub use pairing_diagnostics::{
+    PairingDiagnosticsView, PairingInboundDiagnosticsView, PairingInvitationCandidateDiagnostic,
+};
 pub use uc_observability_contract::analytics::PairingFailureReason;
 
 pub(crate) const LEGACY_SPACE_ID: &str = "space";

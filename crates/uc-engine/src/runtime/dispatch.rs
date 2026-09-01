@@ -63,6 +63,7 @@ use crate::operations::space::create_space::execute_create_space;
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
 use crate::operations::space::join_space::{current_join_result, execute_join_space};
+use crate::operations::space::pairing_diagnostics::execute_query_pairing_diagnostics;
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
@@ -176,6 +177,9 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::QuerySetupState => {
                     execute_query_setup_state(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryPairingDiagnostics => {
+                    execute_query_pairing_diagnostics(self.current_facade().await?.as_ref()).await
                 }
                 Operation::QueryStorageStats => {
                     execute_query_storage_stats(self.current_facade().await?.as_ref()).await

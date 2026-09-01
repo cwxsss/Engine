@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{TimeZone, Utc};
 use tokio::sync::mpsc::Receiver;
@@ -48,11 +48,57 @@ use uc_observability_contract::analytics::{
 };
 
 use super::sponsor_handshake::{JoinerFacts, SponsorHandshakeCoordinator, Verdict};
+use crate::facade::space_setup::PairingInboundDiagnosticsView;
 use crate::space::admission::adapter::WorkspaceAdmissionOwnerPort;
 use crate::space::admission::invitation::holder::{
     InMemoryPairingInvitationHolder, TakeMatchingError,
 };
 use crate::space::convergence::WorkspaceConvergenceError;
+
+#[derive(Default)]
+pub(crate) struct PairingInboundDiagnostics {
+    state: StdMutex<PairingInboundDiagnosticsView>,
+}
+
+impl PairingInboundDiagnostics {
+    pub(crate) fn observe_event(&self, event: &'static str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.events_delivered = state.events_delivered.saturating_add(1);
+        state.last_stage = event.to_owned();
+        state.last_stage_elapsed_ms = 0;
+        state.last_failure = None;
+    }
+
+    pub(crate) fn record_stage(&self, stage: &'static str, elapsed: Duration) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.last_stage = stage.to_owned();
+        state.last_stage_elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+        state.last_failure = None;
+    }
+
+    pub(crate) fn record_failure(&self, stage: &'static str, elapsed: Duration) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.last_stage = stage.to_owned();
+        state.last_stage_elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+        state.last_failure = Some(stage.to_owned());
+    }
+
+    pub(crate) fn snapshot(&self) -> PairingInboundDiagnosticsView {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
 
 /// Drives sponsor-side inbound pairing events.
 pub(crate) struct PairingInboundOrchestrator {
@@ -74,7 +120,10 @@ pub(crate) struct PairingInboundOrchestrator {
     /// guaranteed because every entry is removed at terminal (success or
     /// any post-match failure).
     handshake_started_at: Arc<StdMutex<HashMap<PairingSessionId, Instant>>>,
+    diagnostics: Arc<PairingInboundDiagnostics>,
 }
+
+const INVITATION_CONSUME_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl PairingInboundOrchestrator {
     #[allow(clippy::too_many_arguments)]
@@ -96,7 +145,12 @@ impl PairingInboundOrchestrator {
             workspace_convergence,
             analytics,
             handshake_started_at: Arc::new(StdMutex::new(HashMap::new())),
+            diagnostics: Arc::new(PairingInboundDiagnostics::default()),
         }
+    }
+
+    pub(crate) fn diagnostics(&self) -> Arc<PairingInboundDiagnostics> {
+        Arc::clone(&self.diagnostics)
     }
 
     /// Drop the per-session start time (success or failure terminal).
@@ -166,6 +220,7 @@ impl PairingInboundOrchestrator {
         ),
     )]
     pub(crate) async fn handle_event(&self, event: PairingSessionEvent) {
+        self.diagnostics.observe_event(event_kind(&event));
         let flow_id = FlowId::generate();
         tracing::Span::current().record("flow.id", tracing::field::display(&flow_id));
         match event {
@@ -469,18 +524,30 @@ impl PairingInboundOrchestrator {
                 }
             }
             uc_core::pairing::DurableAdmissionMessageKind::Prepared => {
+                let started_at = Instant::now();
+                self.diagnostics
+                    .record_stage("commit_started", Duration::ZERO);
                 match self
                     .workspace_convergence
                     .commit_sponsor_prepared(&frame)
                     .await
                 {
                     Ok(commit) => {
+                        self.diagnostics
+                            .record_stage("commit_ready", started_at.elapsed());
                         if let Err(error) = self.handshake.send_durable_frame(session, commit).await
                         {
+                            self.diagnostics
+                                .record_failure("commit_send_failed", started_at.elapsed());
                             warn!(session = %session, error = %error, "Commit send failed after durable save");
+                        } else {
+                            self.diagnostics
+                                .record_stage("commit_sent", started_at.elapsed());
                         }
                     }
                     Err(error) => {
+                        self.diagnostics
+                            .record_failure("commit_failed", started_at.elapsed());
                         warn!(session = %session, error = %error, "Prepared verification failed");
                         self.handshake
                             .reject(
@@ -494,19 +561,31 @@ impl PairingInboundOrchestrator {
                 }
             }
             uc_core::pairing::DurableAdmissionMessageKind::Applied => {
+                let started_at = Instant::now();
+                self.diagnostics
+                    .record_stage("complete_started", Duration::ZERO);
                 match self
                     .workspace_convergence
                     .complete_sponsor_applied(&frame)
                     .await
                 {
                     Ok(complete) => {
+                        self.diagnostics
+                            .record_stage("complete_ready", started_at.elapsed());
                         if let Err(error) =
                             self.handshake.send_durable_frame(session, complete).await
                         {
+                            self.diagnostics
+                                .record_failure("complete_send_failed", started_at.elapsed());
                             warn!(session = %session, error = %error, "Complete send failed after durable save");
+                        } else {
+                            self.diagnostics
+                                .record_stage("complete_sent", started_at.elapsed());
                         }
                     }
                     Err(error) => {
+                        self.diagnostics
+                            .record_failure("complete_failed", started_at.elapsed());
                         warn!(session = %session, error = %error, "Applied verification failed");
                         self.handshake
                             .reject(
@@ -543,6 +622,9 @@ impl PairingInboundOrchestrator {
     /// Verified branch: the owner saves the complete Candidate before the
     /// channel sends it. A retry therefore replays the same durable message.
     async fn finalise_verified(&self, session: &PairingSessionId, facts: JoinerFacts) {
+        let started_at = Instant::now();
+        self.diagnostics
+            .record_stage("candidate_preparing", Duration::ZERO);
         // Pre-admission chain synchronization: pull the local chain head up
         // to the newest known member so the admission change is appended to
         // a current head instead of forking the chain on a stale one.
@@ -562,6 +644,8 @@ impl PairingInboundOrchestrator {
         {
             Ok(candidate) => candidate,
             Err(error) => {
+                self.diagnostics
+                    .record_failure("candidate_failed", started_at.elapsed());
                 warn!(
                     session = %session,
                     error = %error,
@@ -591,26 +675,44 @@ impl PairingInboundOrchestrator {
             .send_durable_candidate(session, candidate)
             .await
         {
+            self.diagnostics
+                .record_failure("candidate_send_failed", started_at.elapsed());
             warn!(session = %session, error = %error, "Candidate send failed after durable save");
             self.emit_failure(session, PairingFailureReason::ConnectionLost);
             return;
         }
-        self.notify_consume(&facts.request.invitation_code).await;
+        self.diagnostics
+            .record_stage("candidate_sent", started_at.elapsed());
+        // Consuming the rendezvous record is best-effort cleanup. It must
+        // never hold the per-session admission event queue after Candidate
+        // has been durably saved and sent, otherwise Prepared/Applied can
+        // wait behind an unrelated directory round trip.
+        self.notify_consume_in_background(facts.request.invitation_code.clone());
     }
 
-    async fn notify_consume(&self, code: &InvitationCode) {
-        match self.pairing_invitation.consume_invitation(code).await {
-            Ok(()) => debug!(code = %code.as_str(), "rendezvous consume acknowledged"),
-            Err(ConsumeInvitationError::NotFound | ConsumeInvitationError::Expired) => debug!(
-                code = %code.as_str(),
-                "rendezvous entry already terminal on consume (benign)"
-            ),
-            Err(err) => warn!(
-                code = %code.as_str(),
-                error = %err,
-                "rendezvous consume failed; local handshake proceeds regardless"
-            ),
-        }
+    fn notify_consume_in_background(&self, code: InvitationCode) {
+        let pairing_invitation = Arc::clone(&self.pairing_invitation);
+        tokio::spawn(async move {
+            match tokio::time::timeout(
+                INVITATION_CONSUME_TIMEOUT,
+                pairing_invitation.consume_invitation(&code),
+            )
+            .await
+            {
+                Ok(Ok(())) => debug!("rendezvous consume acknowledged"),
+                Ok(Err(ConsumeInvitationError::NotFound | ConsumeInvitationError::Expired)) => {
+                    debug!("rendezvous entry already terminal on consume (benign)")
+                }
+                Ok(Err(error)) => warn!(
+                    error = %error,
+                    "rendezvous consume failed; local handshake proceeds regardless"
+                ),
+                Err(_) => warn!(
+                    timeout_ms = INVITATION_CONSUME_TIMEOUT.as_millis() as u64,
+                    "rendezvous consume timed out; local handshake proceeds regardless"
+                ),
+            }
+        });
     }
 }
 
@@ -911,6 +1013,14 @@ mod tests {
     #[derive(Default)]
     struct RecordingInvitationPort {
         consumed: StdMutex<Vec<InvitationCode>>,
+        consume_gate: StdMutex<Option<Arc<tokio::sync::Notify>>>,
+    }
+    impl RecordingInvitationPort {
+        fn block_consume(&self) -> Arc<tokio::sync::Notify> {
+            let gate = Arc::new(tokio::sync::Notify::new());
+            *self.consume_gate.lock().unwrap() = Some(Arc::clone(&gate));
+            gate
+        }
     }
     #[async_trait]
     impl PairingInvitationPort for RecordingInvitationPort {
@@ -922,6 +1032,10 @@ mod tests {
             code: &InvitationCode,
         ) -> Result<(), ConsumeInvitationError> {
             self.consumed.lock().unwrap().push(code.clone());
+            let gate = self.consume_gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             Ok(())
         }
     }
@@ -1237,6 +1351,67 @@ mod tests {
                 "confirm_sponsor_complete_ack",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn blocked_rendezvous_cleanup_does_not_delay_durable_completion() {
+        let bundle = Bundle::happy();
+        bundle.holder.insert(pending("CODE-1")).await;
+        let consume_gate = bundle.invitation_port.block_consume();
+        let (orchestrator, session_port, _owner) = bundle.build();
+        let session = PairingSessionId::new("session-nonblocking-consume");
+
+        orchestrator
+            .handle_event(PairingSessionEvent::Incoming {
+                session: session.clone(),
+                message: PairingSessionMessage::Request(joiner_request("CODE-1")),
+            })
+            .await;
+
+        let response_orchestrator = Arc::clone(&orchestrator);
+        let response_session = session.clone();
+        let mut challenge = tokio::spawn(async move {
+            response_orchestrator
+                .handle_event(PairingSessionEvent::MessageReceived {
+                    session: response_session,
+                    message: PairingSessionMessage::ChallengeResponse(JoinerChallengeResponse {
+                        encrypted_challenge: vec![0xAB],
+                    }),
+                })
+                .await;
+        });
+        let challenge_result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut challenge).await;
+
+        orchestrator
+            .handle_event(PairingSessionEvent::MessageReceived {
+                session: session.clone(),
+                message: PairingSessionMessage::DurableAdmission(durable_frame(
+                    uc_core::pairing::DurableAdmissionMessageKind::Prepared,
+                )),
+            })
+            .await;
+        orchestrator
+            .handle_event(PairingSessionEvent::MessageReceived {
+                session,
+                message: PairingSessionMessage::DurableAdmission(durable_frame(
+                    uc_core::pairing::DurableAdmissionMessageKind::Applied,
+                )),
+            })
+            .await;
+
+        consume_gate.notify_waiters();
+        assert!(
+            matches!(challenge_result, Ok(Ok(()))),
+            "Candidate dispatch must not wait for rendezvous cleanup"
+        );
+        assert!(session_port.sent().iter().any(|(_, message)| {
+            matches!(
+                message,
+                PairingSessionMessage::DurableAdmission(frame)
+                    if frame.kind == uc_core::pairing::DurableAdmissionMessageKind::Complete
+            )
+        }));
     }
 
     #[tokio::test]

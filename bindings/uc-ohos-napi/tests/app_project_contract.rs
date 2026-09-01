@@ -68,6 +68,15 @@ fn ohos_har_builder_builds_the_native_binding_before_assembling_the_har() {
     assert!(script.contains("assembleHar"));
     assert!(script.contains("UC_OHOS_SKIP_PACKAGE"));
     assert!(script.contains("UniClipboardEngine.har"));
+    assert!(script.contains("cygpath -ms"));
+    assert!(script.contains("cygpath -u \"$native_root/build-tools/cmake/bin\""));
+    assert!(script.contains("staging_project_root"));
+    assert!(script.contains("UC_OHOS_STAGING_DIR"));
+    assert!(script.contains("cp -R \"$project_root/entry/src/.\" \"$entry_root/src\""));
+    assert!(script.contains("cp -R \"$project_root/hvigor\" \"$staging_project_root/hvigor\""));
+    assert!(script.contains("cp -R \"$project_root/AppScope\" \"$staging_project_root/AppScope\""));
+    assert!(script.contains("har_archive_path"));
+    assert!(script.contains("grep -Fx \"$required_path\" >/dev/null"));
     assert!(!script.contains("/Users/"));
 }
 
@@ -86,6 +95,12 @@ fn ohos_binding_owns_a_distributable_har_module() {
     assert!(package.contains("libuc_ohos_napi.so"));
     assert!(script.contains("bindings/uc-ohos-napi/ohos/index.d.ts"));
     assert!(script.contains("UniClipboardEngine.har.checksum.txt"));
+    for relative in [
+        "tests/hosts/ohos/engine/src/main/cpp/types/libuc_ohos_napi/oh-package.json5",
+        "tests/hosts/ohos/engine/src/main/cpp/types/libuc_ohos_napi/package.json",
+    ] {
+        assert!(workspace_root().join(relative).is_file());
+    }
 }
 
 #[test]
@@ -227,6 +242,42 @@ fn ohos_binding_exposes_the_active_clipboard_query() {
     assert!(runtime.contains("pub async fn query_active_clipboard"));
     assert!(declarations.contains("export interface OhActiveClipboard"));
     assert!(declarations.contains("queryActiveClipboard(): Promise<OhActiveClipboard | null>"));
+}
+
+#[test]
+fn ohos_binding_exposes_redacted_pairing_diagnostics() {
+    let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
+    let library = read("bindings/uc-ohos-napi/src/lib.rs");
+    let runtime = read("bindings/uc-ohos-napi/src/runtime.rs");
+
+    for symbol in [
+        "pub struct OhPairingCandidateDiagnostic",
+        "pub struct OhPairingInboundDiagnostics",
+        "pub struct OhPairingDiagnostics",
+    ] {
+        assert!(library.contains(symbol), "missing N-API object: {symbol}");
+    }
+    for method in [
+        "pub async fn query_pairing_diagnostics",
+        "Operation::QueryPairingDiagnostics",
+        "OperationResult::PairingDiagnostics",
+    ] {
+        assert!(
+            runtime.contains(method),
+            "missing runtime contract: {method}"
+        );
+    }
+    for declaration in [
+        "export interface OhPairingCandidateDiagnostic",
+        "export interface OhPairingInboundDiagnostics",
+        "export interface OhPairingDiagnostics",
+        "queryPairingDiagnostics(): Promise<OhPairingDiagnostics>",
+    ] {
+        assert!(
+            declarations.contains(declaration),
+            "missing ArkTS declaration: {declaration}"
+        );
+    }
 }
 
 #[test]

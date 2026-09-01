@@ -21,7 +21,9 @@ use crate::{
     host, OhActiveClipboard, OhContentTypes, OhContentTypesPatch, OhEngineConfig, OhEngineEvent,
     OhHost, OhInvitationIssued, OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice,
     OhMemberSyncPreferences, OhMemberSyncPreferencesPatch, OhNetworkRecoveryStatus,
-    OhNetworkSettings, OhSendReport, OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
+    OhNetworkSettings, OhPairingCandidateDiagnostic, OhPairingDiagnostics,
+    OhPairingInboundDiagnostics, OhSendReport, OhSessionRecovery, OhSpaceCreated,
+    OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -135,6 +137,36 @@ impl OhEngine {
             .map_err(engine_error)?;
         match result {
             OperationResult::Settings(settings) => Ok(network_settings(&settings)),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_pairing_diagnostics(&self) -> napi::Result<OhPairingDiagnostics> {
+        match self
+            .engine
+            .execute(Operation::QueryPairingDiagnostics)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::PairingDiagnostics(diagnostics) => Ok(OhPairingDiagnostics {
+                candidate_count: diagnostics.candidates.len().min(u32::MAX as usize) as u32,
+                candidates: diagnostics
+                    .candidates
+                    .into_iter()
+                    .map(|candidate| OhPairingCandidateDiagnostic {
+                        kind: candidate.kind,
+                        address_hint: candidate.address_hint,
+                        port: u32::from(candidate.port),
+                    })
+                    .collect(),
+                inbound: OhPairingInboundDiagnostics {
+                    events_delivered: diagnostics.inbound.events_delivered,
+                    last_stage: diagnostics.inbound.last_stage,
+                    last_stage_elapsed_ms: diagnostics.inbound.last_stage_elapsed_ms as f64,
+                    last_failure: diagnostics.inbound.last_failure,
+                },
+            }),
             _ => Err(unexpected_result()),
         }
     }

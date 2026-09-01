@@ -396,6 +396,10 @@ impl AppFacade {
         self.space_admission.list_invitation_addresses().await
     }
 
+    pub async fn pairing_diagnostics(&self) -> crate::facade::PairingDiagnosticsView {
+        self.space.pairing_diagnostics().await
+    }
+
     /// B2:兑换配对邀请。
     pub async fn redeem_pairing_invitation(
         &self,

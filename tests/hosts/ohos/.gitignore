@@ -9,7 +9,7 @@
 /engine/BuildProfile.ets
 /engine/libs/
 /engine/oh_modules/
-/engine/src/main/cpp/types/libuc_ohos_napi/
+/engine/src/main/cpp/types/libuc_ohos_napi/index.d.ts
 /local.properties
 /oh_modules/
 /oh-package-lock.json5

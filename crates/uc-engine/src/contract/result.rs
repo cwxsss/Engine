@@ -38,6 +38,48 @@ pub struct NetworkRecoveryStatusSummary {
     pub next_retry_in_ms: Option<u64>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct PairingCandidateDiagnosticSummary {
+    pub kind: String,
+    pub address_hint: String,
+    pub port: u16,
+}
+
+impl fmt::Debug for PairingCandidateDiagnosticSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PairingCandidateDiagnosticSummary")
+            .field("kind", &self.kind)
+            .field("address_hint", &"[REDACTED]")
+            .field("port", &self.port)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingInboundDiagnosticsSummary {
+    pub events_delivered: u32,
+    pub last_stage: String,
+    pub last_stage_elapsed_ms: u64,
+    pub last_failure: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct PairingDiagnosticsSummary {
+    pub candidates: Vec<PairingCandidateDiagnosticSummary>,
+    pub inbound: PairingInboundDiagnosticsSummary,
+}
+
+impl fmt::Debug for PairingDiagnosticsSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PairingDiagnosticsSummary")
+            .field("candidate_count", &self.candidates.len())
+            .field("inbound", &self.inbound)
+            .finish()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntrySummary {
     pub entry_id: String,
@@ -438,6 +480,7 @@ pub enum OperationResult {
     SpaceReset,
     SpaceFactoryReset,
     SetupState(SetupStateSummary),
+    PairingDiagnostics(PairingDiagnosticsSummary),
     StorageStats(StorageStatsSummary),
     StorageCacheCleared {
         freed_bytes: u64,
@@ -553,6 +596,9 @@ impl fmt::Debug for OperationResult {
             Self::SpaceReset => debug.field("kind", &"space_reset"),
             Self::SpaceFactoryReset => debug.field("kind", &"space_factory_reset"),
             Self::SetupState(state) => debug.field("kind", &"setup_state").field("state", state),
+            Self::PairingDiagnostics(diagnostics) => debug
+                .field("kind", &"pairing_diagnostics")
+                .field("diagnostics", diagnostics),
             Self::StorageStats(stats) => {
                 debug.field("kind", &"storage_stats").field("stats", stats)
             }

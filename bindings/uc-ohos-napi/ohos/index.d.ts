@@ -73,6 +73,25 @@ export interface OhNetworkSettings {
   customRelayUrls: string[]
 }
 
+export interface OhPairingCandidateDiagnostic {
+  kind: string
+  addressHint: string
+  port: number
+}
+
+export interface OhPairingInboundDiagnostics {
+  eventsDelivered: number
+  lastStage: string
+  lastStageElapsedMs: number
+  lastFailure?: string
+}
+
+export interface OhPairingDiagnostics {
+  candidateCount: number
+  candidates: OhPairingCandidateDiagnostic[]
+  inbound: OhPairingInboundDiagnostics
+}
+
 export interface OhLocalDevice {
   deviceId: string
   displayName: string
@@ -186,6 +205,7 @@ export interface OhEngine {
   recoverNetwork(): Promise<void>
   queryNetworkRecoveryStatus(): Promise<OhNetworkRecoveryStatus>
   queryNetworkSettings(): Promise<OhNetworkSettings>
+  queryPairingDiagnostics(): Promise<OhPairingDiagnostics>
   updateNetworkSettings(allowRelayFallback: boolean, customRelayUrls: string[]): Promise<OhNetworkSettings>
   probeRelayUrl(url: string): Promise<number>
   queryLocalDevice(): Promise<OhLocalDevice>
