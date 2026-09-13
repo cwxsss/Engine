@@ -27,3 +27,4 @@ Thumbs.db
 *.sqlite3
 
 .artifacts/
+.ohos-build/

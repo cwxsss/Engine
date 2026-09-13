@@ -54,12 +54,11 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::task::JoinSet;
-use tracing::{info, info_span, instrument, Instrument};
-use uc_observability_contract::FlowId;
+use tracing::info;
 
 /// 主流程等 fan-out join 的硬上限。超过此时长后,剩余仍在跑的 peer task 会被
 /// move 到后台 spawn 继续 join,delivery 写盘与 host event emit 都在后台完成
@@ -103,12 +102,11 @@ use uc_core::clipboard::{
     ClipboardContentCategory, ClipboardContentCategorySet, EntryDeliveryRecord,
 };
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::membership::ContentExchangeGatePort;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     ClipboardDispatchError, ClipboardDispatchPort, ClockPort, ConnectionChannel,
     DeviceIdentityPort, DispatchAck, EntryDeliveryRepositoryPort, FirstSyncStatePort,
-    LocalIdentityPort, PeerAddressRepositoryPort, PresencePort, SettingsPort, SyncPayload,
+    LocalIdentityPort, PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort, SyncPayload,
 };
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::{
@@ -222,9 +220,6 @@ pub(crate) struct DispatchClipboardEntryInput {
     ///
     /// `Some(vec![])` 是合法的"无目标"语义,与差集派生空集等价,不报错。
     pub target_filter: Option<Vec<DeviceId>>,
-    /// Monotonic time at which the source clipboard change was observed.
-    /// Manual resends have no new source observation and leave this empty.
-    pub source_started_at: Option<Instant>,
 }
 
 /// One target's dispatch result. `Ok` + `DispatchAck` when the peer
@@ -324,64 +319,56 @@ pub(crate) struct DispatchClipboardEntryUseCase {
 }
 
 #[cfg(test)]
-pub(crate) struct AllowAllRemovalTargets;
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl ContentExchangeGatePort for AllowAllRemovalTargets {
-    async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-        false
-    }
-}
-
-#[cfg(test)]
 pub(crate) struct AllTestPeerScope;
 
 #[cfg(test)]
+fn all_test_peer_ids() -> Vec<DeviceId> {
+    [
+        "peer-a",
+        "peer-accept-only",
+        "peer-b",
+        "peer-c",
+        "peer-dup",
+        "peer-glitch",
+        "peer-io",
+        "peer-mute",
+        "peer-no-text",
+        "peer-off",
+        "peer-ok",
+        "peer-on",
+        "peer-orphan",
+        "peer-policy",
+        "peer-rej",
+        "peer-rejecty",
+        "peer-slow",
+        "peer-strict",
+        "peer-v2",
+        "peer-1",
+        "peer-2",
+        "peer-p",
+        "peer-rebroadcast",
+        "peer-fast",
+        "peer-slow",
+        "peer-removed",
+        "peer-retained",
+    ]
+    .into_iter()
+    .map(DeviceId::new)
+    .collect()
+}
+
+#[cfg(test)]
 #[async_trait::async_trait]
-impl uc_core::membership::CurrentWorkspacePeerScopePort for AllTestPeerScope {
+impl crate::deps::CurrentSpaceMemberScopePort for AllTestPeerScope {
     async fn snapshot(
         &self,
-    ) -> Result<
-        uc_core::membership::CurrentWorkspacePeerSnapshot,
-        uc_core::membership::CurrentWorkspacePeerScopeError,
-    > {
-        Ok(uc_core::membership::CurrentWorkspacePeerSnapshot {
+    ) -> Result<crate::deps::CurrentSpaceMemberScope, crate::deps::CurrentSpaceMemberScopeError>
+    {
+        Ok(crate::deps::CurrentSpaceMemberScope {
             revision: 1,
-            source: uc_core::membership::CurrentWorkspacePeerScopeSource::CurrentHistory,
-            local_membership: uc_core::membership::CurrentWorkspaceLocalMembership::Active,
-            peer_device_ids: [
-                "peer-a",
-                "peer-accept-only",
-                "peer-b",
-                "peer-c",
-                "peer-dup",
-                "peer-glitch",
-                "peer-io",
-                "peer-mute",
-                "peer-no-text",
-                "peer-off",
-                "peer-ok",
-                "peer-on",
-                "peer-orphan",
-                "peer-policy",
-                "peer-rej",
-                "peer-rejecty",
-                "peer-slow",
-                "peer-strict",
-                "peer-v2",
-                "peer-1",
-                "peer-2",
-                "peer-p",
-                "peer-rebroadcast",
-                "peer-fast",
-                "peer-slow",
-                "peer-removed",
-                "peer-retained",
-            ]
-            .into_iter()
-            .map(DeviceId::new)
-            .collect(),
+            local_member_active: true,
+            usable_peer_device_ids: all_test_peer_ids(),
+            paused_peer_devices: Vec::new(),
         })
     }
 }
@@ -395,7 +382,7 @@ impl DispatchClipboardEntryUseCase {
     pub(crate) fn new(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
         transfer_cipher: Arc<dyn TransferCipherPort>,
         clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
@@ -407,7 +394,7 @@ impl DispatchClipboardEntryUseCase {
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
     ) -> Self {
-        Self::new_with_removal_gate(
+        Self::new_with_scope(
             peer_addr_repo,
             member_repo,
             presence,
@@ -421,16 +408,15 @@ impl DispatchClipboardEntryUseCase {
             first_sync_state,
             entry_delivery_repo,
             host_event_bus,
-            Arc::new(AllowAllRemovalTargets),
             Arc::new(AllTestPeerScope),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_removal_gate(
+    pub(crate) fn new_with_scope(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
         transfer_cipher: Arc<dyn TransferCipherPort>,
         clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
         device_identity: Arc<dyn DeviceIdentityPort>,
@@ -441,20 +427,14 @@ impl DispatchClipboardEntryUseCase {
         first_sync_state: Arc<dyn FirstSyncStatePort>,
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
-        removal_gate: Arc<dyn ContentExchangeGatePort>,
-        peer_scope: Arc<dyn uc_core::membership::CurrentWorkspacePeerScopePort>,
+        peer_scope: Arc<dyn crate::deps::CurrentSpaceMemberScopePort>,
     ) -> Self {
         let header_clock = Arc::clone(&clock);
         Self {
             cipher: transfer_cipher,
             device_identity,
             clock,
-            selector: TargetSelector::new_with_removal_gate(
-                peer_addr_repo,
-                member_repo,
-                removal_gate,
-                peer_scope,
-            ),
+            selector: TargetSelector::new_with_scope(peer_addr_repo, member_repo, peer_scope),
             header_factory: OutboundHeaderFactory::new(settings, local_identity, header_clock),
             dispatcher: Arc::new(PerPeerDispatcher::new(
                 clipboard_dispatch,
@@ -476,21 +456,10 @@ impl DispatchClipboardEntryUseCase {
     //   - 每个目标 peer 进 child span(见下 `peer.dispatch`)而不是把
     //     `peer.device_id` 钉在 root —— 扇出 N 个 peer 时 root 只有一个,
     //     钉上会丢失末次写入以外的信息。
-    #[instrument(
-        skip_all,
-        fields(
-            snapshot_hash = %input.snapshot_hash,
-            flow.id = tracing::field::Empty,
-            flow.kind = "clipboard_sync",
-            fanout.candidates = tracing::field::Empty,
-        ),
-    )]
     pub(crate) async fn execute(
         &self,
         input: DispatchClipboardEntryInput,
     ) -> Result<DispatchOutcome, DispatchSyncError> {
-        let flow_id = FlowId::generate();
-        tracing::Span::current().record("flow.id", tracing::field::display(&flow_id));
         // 1. Encrypt once. A locked session surfaces here — let it
         //    short-circuit so we don't spam the dispatch wire with retries.
         let ciphertext = match self.cipher.encrypt(&input.plaintext).await {
@@ -512,10 +481,7 @@ impl DispatchClipboardEntryUseCase {
         //    fan-out (see `PerPeerDispatcher`).
         let local_device = self.device_identity.current_device_id();
         let candidates = self.selector.select(&input, &local_device).await?;
-        let header = self
-            .header_factory
-            .build(&input, &flow_id, &local_device)
-            .await;
+        let header = self.header_factory.build(&input, &local_device).await;
 
         if candidates.is_empty() {
             info!("dispatch: no paired peers; skipping fan-out");
@@ -532,15 +498,12 @@ impl DispatchClipboardEntryUseCase {
             });
         }
 
-        tracing::Span::current().record("fanout.candidates", candidates.len());
-
         // 4. Fan out: one task per target, each driving `dispatch_one`
         //    (presence preflight + dispatch + per-peer telemetry) inside its
         //    own `peer.dispatch` child span carrying `flow.id`, so Sentry
         //    can join the outbound dispatch with the inbound ingest.
         let payload_type = payload_type_from_categories(&input.categories);
         let payload_size_bucket = PayloadSizeBucket::from_bytes(input.plaintext.len() as u64);
-        let source_started_at = input.source_started_at;
         let header = Arc::new(header);
         let mut set: JoinSet<PeerDispatchResult> = JoinSet::new();
         for device_id in &candidates {
@@ -550,27 +513,18 @@ impl DispatchClipboardEntryUseCase {
                 ciphertext: ciphertext.clone(),
             };
             let device_id = *device_id;
-            let child_span = info_span!(
-                "peer.dispatch",
-                peer.device_id = %device_id.as_str(),
-                flow.id = %flow_id,
-                flow.kind = "clipboard_sync",
-            );
-            set.spawn(
-                async move {
-                    dispatcher
-                        .dispatch_one(
-                            device_id,
-                            header,
-                            payload,
-                            payload_type,
-                            payload_size_bucket,
-                            source_started_at,
-                        )
-                        .await
-                }
-                .instrument(child_span),
-            );
+            let observation = uc_observability_contract::diagnostics::ObservationContext::capture();
+            set.spawn(observation.scope(async move {
+                dispatcher
+                    .dispatch_one(
+                        device_id,
+                        header,
+                        payload,
+                        payload_type,
+                        payload_size_bucket,
+                    )
+                    .await
+            }));
         }
 
         // 5. Drain within the fan-out deadline; classify + fold each
@@ -682,9 +636,9 @@ mod tests {
     use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryStatus};
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
     use uc_core::ports::{
-        ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchReport, DispatchTiming,
-        FirstSyncStateError, LocalIdentityError, LocalIdentityPort, PeerAddressError,
-        PeerAddressRecord, PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort,
+        ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchReport, FirstSyncStateError,
+        LocalIdentityError, LocalIdentityPort, PeerAddressError, PeerAddressRecord,
+        PeerAddressRepositoryPort, PeerReachabilityChanged, PeerReachabilityPort, PresenceError,
         ReachabilityState, SettingsPort,
     };
     use uc_core::security::IdentityFingerprint;
@@ -753,7 +707,6 @@ mod tests {
     fn dispatch_report(outcome: Result<DispatchAck, ClipboardDispatchError>) -> DispatchReport {
         DispatchReport {
             transport: ConnectionChannel::Direct,
-            timing: DispatchTiming::default(),
             outcome,
         }
     }
@@ -871,7 +824,7 @@ mod tests {
 
     struct StaticPresence(ReachabilityState);
     #[async_trait]
-    impl PresencePort for StaticPresence {
+    impl PeerReachabilityPort for StaticPresence {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
@@ -883,7 +836,7 @@ mod tests {
             self.0
         }
 
-        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
             let (_tx, rx) = broadcast::channel(1);
             rx
         }
@@ -1003,7 +956,7 @@ mod tests {
     fn build_uc_with_presence_and_first_sync_state(
         peer_addr_repo: MockPeerAddrRepo,
         member_repo: MockMemberRepo,
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
         cipher: MockCipher,
         dispatch: MockDispatch,
         device_identity: MockDeviceId_,
@@ -1145,7 +1098,6 @@ mod tests {
             // 默认无 filter:历史 verdict 都是"对 peer_addr_repo 全 fan-out"
             // 语义。专门验证 ADR-005 §2.5 resend 路径的 verdict 自行构造 Some。
             target_filter: None,
-            source_started_at: None,
         }
     }
 
@@ -1677,7 +1629,6 @@ mod tests {
             categories,
             entry_id: None,
             target_filter: None,
-            source_started_at: None,
         };
 
         let outcome = uc.execute(text_input).await.expect("dispatch ok");
@@ -2010,7 +1961,6 @@ mod tests {
             categories,
             entry_id: None,
             target_filter: None,
-            source_started_at: None,
         };
 
         uc.execute(file_input).await.expect("dispatch ok");

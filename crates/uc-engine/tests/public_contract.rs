@@ -1,21 +1,28 @@
 use uc_engine::{
-    CancelJoinSpaceInput, ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, DeviceSummary,
-    EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
-    EngineState, EntrySummary, ExportEntryInput, HostFileHandle, InvitationAvailability,
-    JoinSpaceInput, LocalDeviceSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesSummary,
-    Operation, OperationKind, OperationResult, QueryHistoryInput, QueryMemberSyncPreferencesInput,
-    RecoverSessionInput, RefreshReason, RemoveMemberInput, ResendEntryInput, SearchEntriesInput,
-    SearchPageSummary, SearchResultSummary, SecretString, SendFilesInput, SendImageInput,
-    SendTextInput, SetupInvitationSummary, SetupStateSummary, SpaceProtectionModeSummary,
-    SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
+    CancelJoinSpaceInput, ChooseDeviceGroupInput, ContentTypesPatch, ContentTypesSummary,
+    CreateSpaceInput, DeviceSummary, EncryptionStateSummary, EngineConfig, EngineError,
+    EngineErrorCategory, EngineEvent, EngineState, EntrySummary, ExportEntryInput, HostFileHandle,
+    InvitationAvailability, JoinSpaceInput, LocalDeviceSummary, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesSummary, Operation, OperationKind, OperationResult, QueryHistoryInput,
+    QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    ResendEntryInput, SearchEntriesInput, SearchPageSummary, SearchResultSummary, SecretString,
+    SendFilesInput, SendImageInput, SendTextInput, SetupInvitationSummary, SetupStateSummary,
+    SpaceProtectionModeSummary, SpaceProtectionSummary, StorageStatsSummary, UnlockSpaceInput,
     UpdateMemberSyncPreferencesInput, WorkspaceConvergencePhaseSummary,
     WorkspaceConvergenceSummary,
 };
 
-use uc_engine::{
-    DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary, DeviceTrustDecisionSummary,
-    DeviceTrustSnapshotSummary,
-};
+use uc_engine::DeviceTrustSnapshotSummary;
+
+#[test]
+fn observability_contract_is_available_through_engine() {
+    fn accepts_analytics_port<T: uc_engine::observability::analytics::AnalyticsPort + ?Sized>() {}
+
+    accepts_analytics_port::<dyn uc_engine::observability::analytics::AnalyticsPort>();
+    let _ = uc_engine::observability::diagnostics::managed_log_file_date(
+        "uniclipboard-daemon.json.2026-09-11",
+    );
+}
 
 #[test]
 fn engine_config_has_stable_profile_and_version_inputs() {
@@ -111,7 +118,10 @@ fn every_public_operation_has_a_stable_kind() {
             OperationKind::VerifySecureStorageAccess,
         ),
         (Operation::ListDevices, OperationKind::ListDevices),
-        (Operation::QueryDeviceTrust, OperationKind::QueryDeviceTrust),
+        (
+            Operation::QueryDeviceGroupChoices,
+            OperationKind::QueryDeviceGroupChoices,
+        ),
         (
             Operation::QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput {
                 device_id: "member-1".into(),
@@ -1286,7 +1296,7 @@ fn member_sync_preferences_preserve_partial_updates_and_stable_results() {
     assert!(format!("{preferences:?}").contains("member_sync_preferences"));
     assert!(format!(
         "{:?}",
-        OperationResult::WorkspaceConvergence(uc_engine::WorkspaceConvergenceSummary {
+        OperationResult::WorkspaceMembership(uc_engine::WorkspaceConvergenceSummary {
             phase: uc_engine::WorkspaceConvergencePhaseSummary::LocallyApplied,
             revision: 1,
             history_event_count: 1,
@@ -1330,7 +1340,7 @@ fn encryption_operations_expose_only_stable_state_and_outcomes() {
 
 #[test]
 fn workspace_convergence_exposes_only_stable_facts() {
-    let result = OperationResult::WorkspaceConvergence(WorkspaceConvergenceSummary {
+    let result = OperationResult::WorkspaceMembership(WorkspaceConvergenceSummary {
         phase: WorkspaceConvergencePhaseSummary::Converging,
         revision: 3,
         history_event_count: 2,
@@ -1347,7 +1357,7 @@ fn workspace_convergence_exposes_only_stable_facts() {
 
     assert_eq!(
         result,
-        OperationResult::WorkspaceConvergence(WorkspaceConvergenceSummary {
+        OperationResult::WorkspaceMembership(WorkspaceConvergenceSummary {
             phase: WorkspaceConvergencePhaseSummary::Converging,
             revision: 3,
             history_event_count: 2,
@@ -1368,34 +1378,58 @@ fn workspace_convergence_exposes_only_stable_facts() {
 }
 
 #[test]
-fn device_trust_operations_expose_one_complete_query_and_one_result_oriented_decision() {
-    let query = Operation::QueryDeviceTrust;
-    let decide = Operation::DecideDeviceTrustChange(DecideDeviceTrustChangeInput {
-        change_id: "01".repeat(32),
-        choice: DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,
+fn device_group_operations_expose_one_query_and_one_choice() {
+    let query = Operation::QueryDeviceGroupChoices;
+    let decide = Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+        issue_id: "p:01".to_owned(),
+        choice_id: "keep".to_owned(),
+        expected_revision: 1,
         confirm_local_removal: false,
     });
 
-    assert_eq!(query.kind(), OperationKind::QueryDeviceTrust);
-    assert_eq!(query.kind().to_string(), "query_device_trust");
-    assert_eq!(decide.kind(), OperationKind::DecideDeviceTrustChange);
-    assert_eq!(decide.kind().to_string(), "decide_device_trust_change");
+    assert_eq!(query.kind(), OperationKind::QueryDeviceGroupChoices);
+    assert_eq!(query.kind().to_string(), "query_device_group_choices");
+    assert_eq!(decide.kind(), OperationKind::ChooseDeviceGroup);
+    assert_eq!(decide.kind().to_string(), "choose_device_group");
 }
 
+#[cfg(feature = "dev-tools")]
 #[test]
-fn device_trust_results_have_distinct_snapshot_and_decision_shapes() {
-    let snapshot = DeviceTrustSnapshotSummary::empty_unavailable("device-local".into());
-    assert!(matches!(
-        OperationResult::DeviceTrust(snapshot.clone()),
-        OperationResult::DeviceTrust(_)
-    ));
-    assert!(matches!(
-        OperationResult::DeviceTrustDecision(DeviceTrustDecisionSummary::StateChanged {
-            current_change_id: None,
-            snapshot: Box::new(snapshot),
-        }),
-        OperationResult::DeviceTrustDecision(DeviceTrustDecisionSummary::StateChanged { .. })
-    ));
+fn membership_diagnostics_is_available_only_to_dev_tools() {
+    let query = Operation::QueryMembershipDiagnostics;
+
+    assert_eq!(query.kind(), OperationKind::QueryMembershipDiagnostics);
+    assert_eq!(query.kind().to_string(), "query_membership_diagnostics");
+}
+
+#[cfg(feature = "dev-tools")]
+#[test]
+fn development_network_partition_contract_uses_authenticated_endpoint_ids() {
+    let endpoint_id = [7_u8; 32];
+    let query = uc_engine::DevOperation::QueryNetworkEndpointId;
+    let partition = uc_engine::DevOperation::SetNetworkPartition {
+        blocked_endpoint_ids: vec![endpoint_id],
+    };
+
+    assert_eq!(query, uc_engine::DevOperation::QueryNetworkEndpointId);
+    assert_eq!(
+        partition,
+        uc_engine::DevOperation::SetNetworkPartition {
+            blocked_endpoint_ids: vec![endpoint_id],
+        }
+    );
+    assert_eq!(
+        uc_engine::DevOperationResult::NetworkEndpointId(endpoint_id),
+        uc_engine::DevOperationResult::NetworkEndpointId(endpoint_id)
+    );
+    assert_eq!(
+        uc_engine::DevOperationResult::NetworkPartitionUpdated {
+            blocked_peer_count: 1,
+        },
+        uc_engine::DevOperationResult::NetworkPartitionUpdated {
+            blocked_peer_count: 1,
+        }
+    );
 }
 
 #[test]
@@ -1461,17 +1495,21 @@ fn cancel_invitation_has_a_stable_terminal_result() {
 fn invitation_result_exposes_where_the_code_can_be_resolved() {
     let result = OperationResult::InvitationIssued {
         invitation_code: "NEVER-SHOW".into(),
+        full_invitation: "ucspace1_NEVER-SHOW-FULL".into(),
         expires_at_ms: 1234,
         availability: InvitationAvailability::SameLocalNetwork,
     };
 
     assert!(matches!(
-        result,
+        &result,
         OperationResult::InvitationIssued {
             availability: InvitationAvailability::SameLocalNetwork,
+            full_invitation,
             ..
-        }
+        } if full_invitation == "ucspace1_NEVER-SHOW-FULL"
     ));
+    let debug = format!("{result:?}");
+    assert!(!debug.contains("NEVER-SHOW"));
 }
 
 #[test]
@@ -1486,6 +1524,7 @@ fn setup_state_result_preserves_invitation_and_redacts_user_content() {
         space_id: Some("space-1".into()),
         current_invitation: Some(SetupInvitationSummary {
             invitation_code: "NEVER-SHOW".into(),
+            full_invitation: "ucspace1_NEVER-SHOW-FULL".into(),
             expires_at_ms: 1234,
         }),
         device_name: Some("Private Device".into()),
@@ -1576,12 +1615,14 @@ fn join_space_contract_returns_a_tagged_active_result_with_both_identities() {
             migrated_records: Some(42),
             preserved_unreadable_records: Some(3),
         },
+        peer_upgrade_required: true,
     });
     assert!(matches!(
         result,
         OperationResult::JoinSpace(uc_engine::JoinSpaceStatusSummary::Active {
             ref join_id,
             ref joined_space,
+            peer_upgrade_required: true,
         }) if join_id == "join-id"
             && joined_space.sponsor_device_id == "sponsor-1"
             && joined_space.sponsor_identity_fingerprint == "sponsor-fingerprint"
@@ -1691,6 +1732,7 @@ fn operation_result_debug_output_redacts_user_content() {
     let results = [
         OperationResult::InvitationIssued {
             invitation_code: "NEVER-SHOW-INVITATION".into(),
+            full_invitation: "ucspace1_NEVER-SHOW-FULL".into(),
             expires_at_ms: 1,
             availability: InvitationAvailability::CrossNetwork,
         },

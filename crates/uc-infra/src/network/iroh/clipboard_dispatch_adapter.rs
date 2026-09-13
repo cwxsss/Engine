@@ -29,28 +29,34 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr};
 use tokio::sync::{broadcast, Mutex};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument, warn, Instrument};
 
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, ConnectionChannel, DispatchAck,
-    DispatchReport, DispatchTiming, PeerAddressRepositoryPort, PresencePort, SyncPayload,
+    DispatchReport, PeerAddressRepositoryPort, PeerReachabilityPort, SyncPayload,
+};
+use uc_observability_contract::diagnostics::{
+    complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
+    DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
 
 use super::clipboard_wire::{self, AckCode, WireEncodeError};
 use super::conn_path::{path_for, OnMissing};
 use super::connect::connect_with_staggered_retry;
+use super::peer_address_resolver::PeerAddressResolver;
 
 /// ALPN identifier for the Slice 2 clipboard sync protocol. Independent of
 /// the presence / pairing ALPNs so the Router can multiplex all three
 /// transports on the same endpoint.
 pub const CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard-applied/1";
+#[cfg(test)]
 pub const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
 
 /// Result a single in-flight dial broadcasts to every follower waiting
@@ -62,14 +68,14 @@ type DialResult = Result<Connection, String>;
 
 pub struct IrohClipboardDispatchAdapter {
     endpoint: Arc<Endpoint>,
-    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    peer_address_resolver: PeerAddressResolver,
     /// PresencePort handle the adapter notifies on dial failure. A dial
     /// that we have to fall back to `Offline` is first-hand evidence the
     /// peer is unreachable; feeding that signal back through
     /// [`PresencePort::mark_offline`] lets every other consumer of presence
     /// (roster view, fan-out skip logic) observe the truth without waiting
     /// for the keepalive worker's next probe cycle.
-    presence: Arc<dyn PresencePort>,
+    presence: Arc<dyn PeerReachabilityPort>,
     /// Single-flight slot per destination device. Concurrent dispatches to
     /// the same peer collapse to one `connect_with_staggered_retry`
     /// invocation: the first caller becomes the leader (records its
@@ -88,11 +94,11 @@ impl IrohClipboardDispatchAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        presence: Arc<dyn PresencePort>,
+        presence: Arc<dyn PeerReachabilityPort>,
     ) -> Self {
         Self {
             endpoint,
-            peer_addr_repo,
+            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
             presence,
             in_flight_dials: Mutex::new(HashMap::new()),
         }
@@ -139,7 +145,8 @@ impl IrohClipboardDispatchAdapter {
                     Arc::clone(&self.endpoint),
                     addr,
                     CLIPBOARD_ALPN,
-                    "clipboard",
+            "clipboard",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
                 )
                 .await;
 
@@ -181,30 +188,12 @@ impl IrohClipboardDispatchAdapter {
     /// infra) surfaces as `Offline` after logging — a corrupt blob is a
     /// data-integrity issue the next pairing sync will self-heal.
     async fn resolve_addr(&self, target: &DeviceId) -> Option<EndpointAddr> {
-        match self.peer_addr_repo.get(target).await {
-            // Stored blobs are guaranteed to be persistable form (NodeId
-            // + Relay hint, no `Ip(...)` ephemera) — see
-            // `persistable_addr::to_persistable_addr`. Iroh's pkarr
-            // discovery resolves the peer's current direct addrs at
-            // connect time, so we hand the decoded addr through as-is.
-            Ok(Some(record)) => match postcard::from_bytes::<EndpointAddr>(&record.addr_blob) {
-                Ok(addr) => Some(addr),
-                Err(err) => {
-                    warn!(
-                        device = %target.as_str(),
-                        error = %err,
-                        "clipboard dispatch: peer_addr_repo blob did not postcard-decode; \
-                         treating peer as offline"
-                    );
-                    None
-                }
-            },
-            Ok(None) => None,
-            Err(err) => {
+        match self.peer_address_resolver.resolve(target).await {
+            Ok(address) => address,
+            Err(error) => {
                 warn!(
-                    device = %target.as_str(),
-                    error = %err,
-                    "clipboard dispatch: peer_addr_repo.get failed; treating peer as offline"
+                    error_kind = error.kind(),
+                    "clipboard dispatch address resolution failed; treating peer as offline"
                 );
                 None
             }
@@ -219,17 +208,13 @@ impl IrohClipboardDispatchAdapter {
         connection: &Connection,
         header: &ClipboardHeader,
         payload: &SyncPayload,
-        timing: &mut DispatchTiming,
     ) -> Result<DispatchAck, ClipboardDispatchError> {
-        let stream_started_at = Instant::now();
         let stream = connection.open_bi().await;
-        timing.stream_open_ms = Some(duration_ms(stream_started_at.elapsed()));
         let (mut send, mut recv) =
             stream.map_err(|err| ClipboardDispatchError::Io(format!("open_bi: {err}")))?;
 
         // Write the frame + close the send half so the peer's read_exact on
         // the payload length / body reaches a terminal state.
-        let frame_write_started_at = Instant::now();
         let frame_write =
             match clipboard_wire::write_frame(&mut send, header, &payload.ciphertext).await {
                 Ok(()) => send
@@ -237,13 +222,10 @@ impl IrohClipboardDispatchAdapter {
                     .map_err(|err| ClipboardDispatchError::Io(format!("send.finish: {err}"))),
                 Err(error) => Err(map_encode_err(error)),
             };
-        timing.frame_write_ms = Some(duration_ms(frame_write_started_at.elapsed()));
         frame_write?;
 
         let mut ack_buf = [0u8; 1];
-        let receiver_apply_wait_started_at = Instant::now();
         let ack_read = recv.read_exact(&mut ack_buf).await;
-        timing.receiver_apply_wait_ms = Some(duration_ms(receiver_apply_wait_started_at.elapsed()));
         ack_read.map_err(|err| ClipboardDispatchError::Io(format!("ack read: {err}")))?;
 
         // Any unknown code is adapter-level rejection rather than an ignored
@@ -251,6 +233,7 @@ impl IrohClipboardDispatchAdapter {
         match AckCode::try_from(ack_buf[0]) {
             Ok(AckCode::Accepted) => Ok(DispatchAck::Accepted),
             Ok(AckCode::DuplicateIgnored) => Ok(DispatchAck::DuplicateIgnored),
+            Ok(AckCode::Incompatible) => Err(ClipboardDispatchError::PeerIncompatible),
             Ok(AckCode::Rejected) => Err(ClipboardDispatchError::PeerRejected(
                 "peer returned Rejected ack".to_string(),
             )),
@@ -270,8 +253,6 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         header: &ClipboardHeader,
         payload: SyncPayload,
     ) -> DispatchReport {
-        let mut timing = DispatchTiming::default();
-
         // 1. Early-reject oversized payloads at the adapter boundary so
         //    the caller gets a clean error without us opening a stream
         //    just to tear it back down. This is a *local* policy check —
@@ -282,7 +263,6 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         if payload.ciphertext.len() > clipboard_wire::MAX_PAYLOAD_SIZE as usize {
             return DispatchReport {
                 transport: ConnectionChannel::Unknown,
-                timing,
                 outcome: Err(ClipboardDispatchError::LocalPolicyExceeded(format!(
                     "ciphertext {} bytes exceeds wire MAX_PAYLOAD_SIZE {}",
                     payload.ciphertext.len(),
@@ -293,15 +273,23 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
 
         // 2. Resolve address; missing / bad record = offline. No dial, so
         //    no path established → transport Unknown.
-        let address_resolution_started_at = Instant::now();
-        let addr = self.resolve_addr(target).await;
-        timing.address_resolution_ms = duration_ms(address_resolution_started_at.elapsed());
+        let started = Instant::now();
+        let span = network_span(DiagnosticOperation::ClipboardAddressResolve);
+        let addr = self.resolve_addr(target).instrument(span.clone()).await;
+        span.in_scope(|| {
+            network_completion(
+                DiagnosticOperation::ClipboardAddressResolve,
+                DiagnosticErrorType::AddressUnavailable,
+                started,
+                addr.is_some(),
+            )
+        });
+        drop(span);
         let addr = match addr {
             Some(a) => a,
             None => {
                 return DispatchReport {
                     transport: ConnectionChannel::Unknown,
-                    timing,
                     outcome: Err(ClipboardDispatchError::Offline),
                 }
             }
@@ -317,9 +305,21 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         //    already fed the verdict to PresencePort so this branch only
         //    has to surface the public error. No path established →
         //    transport Unknown.
-        let connection_started_at = Instant::now();
-        let connection = self.dial_single_flight(target, addr).await;
-        timing.connection_ms = Some(duration_ms(connection_started_at.elapsed()));
+        let started = Instant::now();
+        let span = network_span(DiagnosticOperation::ClipboardConnect);
+        let connection = self
+            .dial_single_flight(target, addr)
+            .instrument(span.clone())
+            .await;
+        span.in_scope(|| {
+            network_completion(
+                DiagnosticOperation::ClipboardConnect,
+                DiagnosticErrorType::ConnectFailed,
+                started,
+                connection.is_ok(),
+            )
+        });
+        drop(span);
         let connection = match connection {
             Ok(connection) => connection,
             Err(err) => {
@@ -329,16 +329,13 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
                 );
                 return DispatchReport {
                     transport: ConnectionChannel::Unknown,
-                    timing,
                     outcome: Err(ClipboardDispatchError::Offline),
                 };
             }
         };
 
         // 4. Write the frame + read the ack on a fresh bi-stream.
-        let outcome = self
-            .send_and_ack(&connection, header, &payload, &mut timing)
-            .await;
+        let outcome = self.send_and_ack(&connection, header, &payload).await;
 
         // 5. Probe the path that actually served this attempt while the
         //    connection is still alive. Sampling right after the send/ack
@@ -355,16 +352,41 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         //    cache connections.
         drop(connection);
 
-        DispatchReport {
-            transport,
-            timing,
-            outcome,
-        }
+        DispatchReport { transport, outcome }
     }
 }
 
-fn duration_ms(duration: Duration) -> u32 {
-    duration.as_millis().min(u32::MAX as u128) as u32
+fn network_span(operation: DiagnosticOperation) -> tracing::Span {
+    operation_span(OperationContext {
+        domain: DiagnosticDomain::Clipboard,
+        operation,
+        role: DiagnosticRole::Client,
+        kind: DiagnosticSpanKind::Internal,
+    })
+}
+
+fn network_completion(
+    operation: DiagnosticOperation,
+    error: DiagnosticErrorType,
+    started: Instant,
+    succeeded: bool,
+) {
+    complete_operation(if succeeded {
+        OperationCompletion::succeeded(
+            DiagnosticDomain::Clipboard,
+            operation,
+            DiagnosticRole::Client,
+            started.elapsed(),
+        )
+    } else {
+        OperationCompletion::failed(
+            DiagnosticDomain::Clipboard,
+            operation,
+            DiagnosticRole::Client,
+            error,
+            started.elapsed(),
+        )
+    });
 }
 
 /// Map wire-encoding failures into the public error type without leaking
@@ -413,7 +435,8 @@ mod tests {
     use tokio::sync::broadcast;
 
     use uc_core::ports::{
-        PeerAddressError, PeerAddressRecord, PresenceError, PresenceEvent, ReachabilityState,
+        PeerAddressError, PeerAddressRecord, PeerReachabilityChanged, PresenceError,
+        ReachabilityState,
     };
 
     // PresencePort mock for the dispatch tests. None of the four tests in
@@ -431,17 +454,17 @@ mod tests {
         Presence {}
 
         #[async_trait]
-        impl PresencePort for Presence {
+        impl PeerReachabilityPort for Presence {
             async fn ensure_reachable(
                 &self,
                 device: &DeviceId,
             ) -> Result<ReachabilityState, PresenceError>;
             async fn current_state(&self, device: &DeviceId) -> ReachabilityState;
-            fn subscribe(&self) -> broadcast::Receiver<PresenceEvent>;
+            fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
         }
     }
 
-    fn presence_mock() -> Arc<dyn PresencePort> {
+    fn presence_mock() -> Arc<dyn PeerReachabilityPort> {
         Arc::new(MockPresence::new())
     }
 
@@ -519,7 +542,6 @@ mod tests {
             origin_device_id: "sender-001".to_string(),
             origin_device_name: "Sender".to_string(),
             payload_version: 3,
-            flow_id: None,
         }
     }
 
@@ -596,37 +618,6 @@ mod tests {
         peer_router.shutdown().await.expect("router shutdown");
     }
 
-    #[tokio::test]
-    async fn dispatch_records_timing_for_accepted_delivery() {
-        let (peer_endpoint, peer_router) = spawn_ack_endpoint(AckCode::Accepted.as_byte()).await;
-        let peer_addr = peer_endpoint.addr();
-
-        let sender_endpoint = bind_endpoint().await;
-        wait_for_direct_addrs(&sender_endpoint).await;
-        let repo = Arc::new(MemRepo::default());
-        let target = DeviceId::new("timed-target");
-        seed_addr(&repo, &target, &peer_addr).await;
-
-        let adapter = IrohClipboardDispatchAdapter::new(sender_endpoint, repo, presence_mock());
-        let report = adapter
-            .dispatch(
-                &target,
-                &sample_header(),
-                SyncPayload {
-                    ciphertext: Bytes::from_static(b"timed delivery"),
-                },
-            )
-            .await;
-
-        assert!(matches!(report.outcome, Ok(DispatchAck::Accepted)));
-        assert!(report.timing.connection_ms.is_some());
-        assert!(report.timing.stream_open_ms.is_some());
-        assert!(report.timing.frame_write_ms.is_some());
-        assert!(report.timing.receiver_apply_wait_ms.is_some());
-
-        peer_router.shutdown().await.expect("router shutdown");
-    }
-
     /// Verdict 2 — peer returns the duplicate-ignored ack. Dispatch still
     /// returns `Ok`, and the specific variant propagates so the use case
     /// can report it distinct from `Accepted`.
@@ -654,6 +645,36 @@ mod tests {
             .expect("dispatch succeeds");
         assert_eq!(ack, DispatchAck::DuplicateIgnored);
 
+        peer_router.shutdown().await.expect("router shutdown");
+    }
+
+    #[tokio::test]
+    async fn dispatch_maps_incompatible_ack_to_the_public_upgrade_error() {
+        let (peer_endpoint, peer_router) =
+            spawn_ack_endpoint(AckCode::Incompatible.as_byte()).await;
+        let peer_addr = peer_endpoint.addr();
+        let sender_endpoint = bind_endpoint().await;
+        wait_for_direct_addrs(&sender_endpoint).await;
+        let repo = Arc::new(MemRepo::default());
+        let target = DeviceId::new("old-engine-target");
+        seed_addr(&repo, &target, &peer_addr).await;
+        let adapter = IrohClipboardDispatchAdapter::new(sender_endpoint, repo, presence_mock());
+
+        let outcome = adapter
+            .dispatch(
+                &target,
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: Bytes::from_static(b"ciphertext"),
+                },
+            )
+            .await
+            .outcome;
+
+        assert!(matches!(
+            outcome,
+            Err(ClipboardDispatchError::PeerIncompatible)
+        ));
         peer_router.shutdown().await.expect("router shutdown");
     }
 
@@ -724,7 +745,7 @@ mod tests {
     /// `presence_mock()` so any accidental call still panics.
     struct CountingPresence {
         mark_offline_calls: Arc<std::sync::atomic::AtomicUsize>,
-        events: broadcast::Sender<PresenceEvent>,
+        events: broadcast::Sender<PeerReachabilityChanged>,
     }
 
     impl CountingPresence {
@@ -738,7 +759,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl PresencePort for CountingPresence {
+    impl PeerReachabilityPort for CountingPresence {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
@@ -752,7 +773,7 @@ mod tests {
             self.mark_offline_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
             self.events.subscribe()
         }
     }

@@ -13,12 +13,12 @@ use uc_core::clipboard::{
 use uc_core::ids::{FormatId, RepresentationId};
 use uc_core::ports::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError, HostEvent,
-    HostEventEmitterPort, PlatformClipboardPort, SecureStorageError, SecureStoragePort,
-    SystemClipboardPort, TransferHostEvent,
+    HostEventEmitterPort, MembershipHostEvent, PlatformClipboardPort, SecureStorageError,
+    SecureStoragePort, SystemClipboardPort, TransferHostEvent,
 };
 use uc_observability_contract::analytics::DefaultAnalyticsFacade;
 
-use crate::assembly::deps::{BackgroundRuntimeDeps, WiredDependencies, WiringError, WiringResult};
+use crate::assembly::deps::{WiredDependencies, WiringError, WiringResult};
 use crate::assembly::platform::SystemClipboardLayer;
 use crate::assembly::wire::{wire_dependencies_from_inputs, CoreWiringInputs};
 use crate::engine::event_stream::EventSender;
@@ -456,6 +456,14 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
                 attempt_id,
                 state,
             }),
+            HostEvent::Membership(MembershipHostEvent::LedgerCommitted { revision }) => {
+                EngineEvent::DeviceTrustChanged { revision }
+            }
+            HostEvent::Membership(MembershipHostEvent::AdmissionChanged) => {
+                EngineEvent::RefreshRequired {
+                    reason: crate::RefreshReason::StateInvalidated,
+                }
+            }
         };
         self.events.send(event);
         Ok(())
@@ -464,7 +472,6 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
 
 pub struct HostWiring {
     pub wired: WiredDependencies,
-    pub background: BackgroundRuntimeDeps,
     pub paths: AppPaths,
     pub temporary_dir: std::path::PathBuf,
     pub clipboard_import_root: std::path::PathBuf,
@@ -473,17 +480,25 @@ pub struct HostWiring {
 }
 
 #[cfg(test)]
-pub fn wire_host_capabilities(
+pub async fn wire_host_capabilities(
     config: &EngineConfig,
     host: HostCapabilities,
 ) -> WiringResult<HostWiring> {
-    wire_host_capabilities_with_emitter(config, host, Arc::new(NoopHostEventEmitter))
+    let (progress, _) = crate::StartupProgress::channel();
+    wire_host_capabilities_with_emitter(
+        config,
+        host,
+        Arc::new(NoopHostEventEmitter),
+        progress.store.clone(),
+    )
+    .await
 }
 
-pub(crate) fn wire_host_capabilities_with_emitter(
+pub(crate) async fn wire_host_capabilities_with_emitter(
     config: &EngineConfig,
     host: HostCapabilities,
     host_event_emitter: Arc<dyn HostEventEmitterPort>,
+    startup_progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
 ) -> WiringResult<HostWiring> {
     let (directories, secure_storage, mut clipboard, files, analytics) = host.into_parts();
     let clipboard_changes = clipboard.take_change_stream().map_err(|_| {
@@ -515,7 +530,7 @@ pub(crate) fn wire_host_capabilities_with_emitter(
         WiringError::ClipboardInit("failed to create host clipboard import directory".into())
     })?;
     let files: Arc<dyn HostFileAccess> = Arc::from(files);
-    let (wired, background) = wire_dependencies_from_inputs(CoreWiringInputs {
+    let wired = wire_dependencies_from_inputs(CoreWiringInputs {
         paths: paths.clone(),
         secure_storage,
         profile_id: uc_core::ids::ProfileId::from(config.profile_id()),
@@ -538,11 +553,12 @@ pub(crate) fn wire_host_capabilities_with_emitter(
             analytics.identity,
         )),
         host_event_emitter,
-    })?;
+        startup_progress,
+    })
+    .await?;
 
     Ok(HostWiring {
         wired,
-        background,
         paths,
         temporary_dir,
         clipboard_import_root,
@@ -556,13 +572,13 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use uc_application::deps::CurrentMemberSignatureError;
     use uc_core::file_transfer::FileTransferDirection;
-    use uc_core::ids::SpaceId;
-    use uc_core::membership::{CurrentMemberSignatureError, MembershipCandidateRepositoryError};
     use uc_core::ports::{
         ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, HostEvent,
-        HostEventEmitterPort, TransferHostEvent,
+        HostEventEmitterPort, MembershipHostEvent, TransferHostEvent,
     };
+    use uc_core::TaskRegistry;
 
     use crate::engine::event_stream::event_channel;
     use crate::{
@@ -574,6 +590,7 @@ mod tests {
     };
 
     use super::{adopt_v019_profile_directories, wire_host_capabilities, EngineHostEventEmitter};
+    use crate::assembly::deps::WiringError;
     use crate::assembly::lifecycle::build_daemon_lifecycle;
 
     #[test]
@@ -759,17 +776,10 @@ mod tests {
             Box::new(EmptyHostFiles),
         );
 
-        let wiring = wire_host_capabilities(&EngineConfig::new("test"), host).unwrap();
+        let wiring = wire_host_capabilities(&EngineConfig::new("test"), host)
+            .await
+            .unwrap();
 
-        assert_eq!(
-            wiring
-                .wired
-                .sync_engine
-                .membership_candidate_repo
-                .list(&SpaceId::from("space-a"))
-                .await,
-            Err(MembershipCandidateRepositoryError::Locked)
-        );
         assert_eq!(
             wiring
                 .wired
@@ -780,21 +790,45 @@ mod tests {
             Err(CurrentMemberSignatureError::Unavailable)
         );
         assert!(!wiring.wired.sync_engine.membership_session.is_ready());
-        assert_eq!(
-            wiring
-                .wired
-                .sync_engine
-                .workspace_convergence_repository
-                .load_state()
-                .await,
-            Err(uc_core::membership::WorkspaceConvergenceRepositoryError::Locked)
+    }
+
+    #[tokio::test]
+    async fn held_storage_upgrade_lease_blocks_ordinary_runtime_wiring() {
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("private");
+        let upgrade_directory = private.join("profile-storage-upgrade");
+        std::fs::create_dir_all(&upgrade_directory).unwrap();
+        let lease = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(upgrade_directory.join(".lease"))
+            .unwrap();
+        uc_infra::fs::file_lock::try_lock_exclusive(&lease).unwrap();
+        let host = HostCapabilities::new(
+            HostDirectories::new(
+                private.clone(),
+                root.path().join("cache"),
+                root.path().join("temporary"),
+                root.path().join("logs"),
+            ),
+            Box::new(TestSecureStorage::default()),
+            Box::new(EmptyHostClipboard),
+            Box::new(EmptyHostFiles),
         );
+
+        let result = wire_host_capabilities(&EngineConfig::new("test"), host).await;
+
+        assert!(matches!(result, Err(WiringError::StorageUpgradePending)));
+        assert!(!private.join("uniclipboard.db").exists());
+        assert!(!private.join("profile-data-generations").exists());
+        assert!(!private.join("space-control-generations").exists());
     }
 
     // 流程：启动真实生产组装，确认 1.1 成员核对与旧空间升级入口同时存在，
     // 再确认已经废弃的成员移除入口没有被重新带回。
     #[tokio::test]
-    async fn production_engine_assembly_registers_membership_attestation_protocol() {
+    async fn production_engine_assembly_registers_new_space_protocols() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("private")).unwrap();
         let host = HostCapabilities::new(
@@ -808,36 +842,50 @@ mod tests {
             Box::new(EmptyHostClipboard),
             Box::new(EmptyHostFiles),
         );
-        let wiring = wire_host_capabilities(&EngineConfig::new("1.2.3"), host).unwrap();
-        let mut settings = wiring.wired.deps.settings.load().await.unwrap();
+        let wiring = wire_host_capabilities(&EngineConfig::new("1.2.3"), host)
+            .await
+            .unwrap();
+        let mut settings = wiring.wired.sync_engine.settings.load().await.unwrap();
         settings.network.allow_relay_fallback = false;
-        wiring.wired.deps.settings.save(&settings).await.unwrap();
+        wiring
+            .wired
+            .sync_engine
+            .settings
+            .save(&settings)
+            .await
+            .unwrap();
+        let task_registry = Arc::new(TaskRegistry::new());
+        wiring
+            .wired
+            .application
+            .start_process_runtime(Arc::clone(&task_registry))
+            .await
+            .unwrap();
 
         let lifecycle = build_daemon_lifecycle(
-            &wiring.wired.deps,
+            &wiring.wired.application,
             &wiring.wired.sync_engine,
-            &wiring.wired.shared,
             "1.2.3",
             #[cfg(feature = "lan-compat")]
             wiring.wired.mobile_sync_ports.clone(),
             None,
             None,
             None,
-            uc_application::facade::PairingInvitationRuntime::default(),
+            None,
         )
         .await
-        .unwrap();
-        let reachable = lifecycle
-            .sync_engine_assembly
-            .membership_attestation_is_reachable_for_test()
-            .await;
+        .unwrap_or_else(|error| panic!("daemon lifecycle assembly failed: {error:#}"));
         let membership_history_reachable = lifecycle
             .sync_engine_assembly
             .membership_history_exchange_is_reachable_for_test()
             .await;
-        let admission_completion_recovery_reachable = lifecycle
+        let membership_branch_recovery_reachable = lifecycle
             .sync_engine_assembly
-            .admission_completion_recovery_is_reachable_for_test()
+            .membership_branch_recovery_is_reachable_for_test()
+            .await;
+        let space_admission_reachable = lifecycle
+            .sync_engine_assembly
+            .space_admission_is_reachable_for_test()
             .await;
         let deprecated_removal_protocols_reachable = lifecycle
             .sync_engine_assembly
@@ -847,18 +895,21 @@ mod tests {
             .sync_engine_assembly
             .shutdown(uc_core::FileTransferCancellationReason::Unknown)
             .await;
+        task_registry
+            .shutdown(std::time::Duration::from_millis(500))
+            .await;
 
-        assert!(
-            reachable,
-            "membership attestation protocol was not installed"
-        );
         assert!(
             membership_history_reachable,
             "membership history exchange was not installed"
         );
         assert!(
-            admission_completion_recovery_reachable,
-            "admission completion recovery was not installed"
+            membership_branch_recovery_reachable,
+            "membership branch recovery protocol was not installed"
+        );
+        assert!(
+            space_admission_reachable,
+            "Space admission protocol was not installed"
         );
         assert!(
             !deprecated_removal_protocols_reachable,
@@ -898,6 +949,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_event_emitter_forwards_membership_revision() {
+        let (events, mut stream) = event_channel(8);
+        let emitter = EngineHostEventEmitter::new(events);
+
+        emitter
+            .emit(HostEvent::Membership(
+                MembershipHostEvent::LedgerCommitted { revision: 7 },
+            ))
+            .unwrap();
+
+        assert_eq!(
+            stream.next().await,
+            Some(EngineEvent::DeviceTrustChanged { revision: 7 })
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_event_emitter_turns_admission_changes_into_a_refresh() {
+        let (events, mut stream) = event_channel(8);
+        let emitter = EngineHostEventEmitter::new(events);
+
+        emitter
+            .emit(HostEvent::Membership(MembershipHostEvent::AdmissionChanged))
+            .unwrap();
+
+        assert_eq!(
+            stream.next().await,
+            Some(EngineEvent::RefreshRequired {
+                reason: crate::RefreshReason::StateInvalidated,
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn engine_event_emitter_preserves_clipboard_change_details() {
         let (events, mut stream) = event_channel(8);
         let emitter = EngineHostEventEmitter::new(events);
@@ -923,6 +1008,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_event_emitter_preserves_unowned_transfer_completion() {
+        let (events, mut stream) = event_channel(8);
+        let emitter = EngineHostEventEmitter::new(events);
+        emitter
+            .emit(HostEvent::Transfer(TransferHostEvent::StatusChanged {
+                transfer_id: "provisional".into(),
+                entry_id: None,
+                attempt_id: None,
+                status: "completed".into(),
+                reason: None,
+            }))
+            .unwrap();
+        assert!(
+            matches!(stream.next().await, Some(EngineEvent::TransferStatusChanged(TransferStatusChanged {
+            entry_id: None, attempt_id: None, transfer_id, status, ..
+        })) if transfer_id == "provisional" && status == "completed")
+        );
+    }
+
+    #[tokio::test]
     async fn engine_event_emitter_preserves_transfer_status_details() {
         let (events, mut stream) = event_channel(8);
         let emitter = EngineHostEventEmitter::new(events);
@@ -930,7 +1035,7 @@ mod tests {
         emitter
             .emit(HostEvent::Transfer(TransferHostEvent::StatusChanged {
                 transfer_id: "transfer-1".into(),
-                entry_id: "entry-1".into(),
+                entry_id: Some("entry-1".into()),
                 attempt_id: Some("attempt-1".into()),
                 status: "failed".into(),
                 reason: Some("cancelled".into()),
@@ -941,7 +1046,7 @@ mod tests {
             stream.next().await,
             Some(EngineEvent::TransferStatusChanged(TransferStatusChanged {
                 transfer_id: "transfer-1".into(),
-                entry_id: "entry-1".into(),
+                entry_id: Some("entry-1".into()),
                 attempt_id: Some("attempt-1".into()),
                 status: "failed".into(),
                 reason: Some("cancelled".into()),

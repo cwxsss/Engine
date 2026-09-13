@@ -15,8 +15,8 @@
 //!
 //! ## 模块导出
 //!
-//! 按 `uc-application/AGENTS.md` §11.4,只暴露 Facade + Query/Result/Error +
-//! 订阅事件类型。`PresenceEvent` 从 `uc-core` 透出以便上层 crate 订阅
+//! 按 `docs/design-docs/layers/application.md`,只暴露 Facade + Query/Result/Error +
+//! 订阅事件类型。`PeerReachabilityChanged` 从 `uc-core` 透出以便上层 crate 订阅
 //! `subscribe_presence_events()` 时不用直接依赖 `uc-core::ports`。
 
 mod commands;
@@ -26,11 +26,11 @@ mod facade;
 pub use commands::{
     ContentTypesPatch, ContentTypesView, MemberProtectionStatusView, MemberProtectionView,
     MemberSummary, MemberSyncPreferencesPatch, MemberSyncPreferencesView, PeerSnapshotView,
-    RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
+    PresenceRefreshReport, RosterEntry, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use errors::RosterError;
-pub use facade::{MemberRosterDeps, MemberRosterFacade};
-pub use uc_core::ports::{ConnectionChannel, PresenceEvent};
+pub(crate) use facade::{MemberRosterDeps, MemberRosterFacade};
+pub use uc_core::ports::{ConnectionChannel, PeerReachabilityChanged};
 
 /// Phase 96 INDIC-01:`ConnectionChannel` 4 态映射到稳定 wire 字符串。
 ///

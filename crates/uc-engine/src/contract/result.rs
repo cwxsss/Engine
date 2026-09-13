@@ -38,48 +38,6 @@ pub struct NetworkRecoveryStatusSummary {
     pub next_retry_in_ms: Option<u64>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct PairingCandidateDiagnosticSummary {
-    pub kind: String,
-    pub address_hint: String,
-    pub port: u16,
-}
-
-impl fmt::Debug for PairingCandidateDiagnosticSummary {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PairingCandidateDiagnosticSummary")
-            .field("kind", &self.kind)
-            .field("address_hint", &"[REDACTED]")
-            .field("port", &self.port)
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PairingInboundDiagnosticsSummary {
-    pub events_delivered: u32,
-    pub last_stage: String,
-    pub last_stage_elapsed_ms: u64,
-    pub last_failure: Option<String>,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct PairingDiagnosticsSummary {
-    pub candidates: Vec<PairingCandidateDiagnosticSummary>,
-    pub inbound: PairingInboundDiagnosticsSummary,
-}
-
-impl fmt::Debug for PairingDiagnosticsSummary {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PairingDiagnosticsSummary")
-            .field("candidate_count", &self.candidates.len())
-            .field("inbound", &self.inbound)
-            .finish()
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntrySummary {
     pub entry_id: String,
@@ -433,6 +391,7 @@ pub enum JoinSpaceStatusSummary {
     Active {
         join_id: String,
         joined_space: JoinedSpaceSummary,
+        peer_upgrade_required: bool,
     },
     Pending {
         join_id: String,
@@ -440,6 +399,7 @@ pub enum JoinSpaceStatusSummary {
         sponsor_device_id: Option<String>,
         sponsor_identity_fingerprint: Option<String>,
         cancel_requested: bool,
+        peer_upgrade_required: bool,
     },
     Rejected {
         join_id: String,
@@ -473,6 +433,7 @@ pub enum OperationResult {
     },
     InvitationIssued {
         invitation_code: String,
+        full_invitation: String,
         expires_at_ms: i64,
         availability: InvitationAvailability,
     },
@@ -480,7 +441,6 @@ pub enum OperationResult {
     SpaceReset,
     SpaceFactoryReset,
     SetupState(SetupStateSummary),
-    PairingDiagnostics(PairingDiagnosticsSummary),
     StorageStats(StorageStatsSummary),
     StorageCacheCleared {
         freed_bytes: u64,
@@ -488,6 +448,7 @@ pub enum OperationResult {
     LocalDevice(LocalDeviceSummary),
     PeerConnections(Vec<PeerConnectionSummary>),
     PeerConnectionsRefreshed(PeerConnectionRefreshSummary),
+    ConnectivityOpportunityAccepted,
     NetworkRecovered,
     NetworkRecoveryStatus(NetworkRecoveryStatusSummary),
     Settings(Box<SettingsSummary>),
@@ -538,9 +499,12 @@ pub enum OperationResult {
     },
     Devices(Vec<DeviceSummary>),
     MemberSyncPreferences(MemberSyncPreferencesSummary),
-    WorkspaceConvergence(WorkspaceConvergenceSummary),
+    WorkspaceMembership(WorkspaceConvergenceSummary),
     DeviceTrust(DeviceTrustSnapshotSummary),
-    DeviceTrustDecision(DeviceTrustDecisionSummary),
+    DeviceGroupChoices(DeviceGroupChoicesSummary),
+    DeviceGroupChosen(DeviceGroupChoiceResultSummary),
+    #[cfg(feature = "dev-tools")]
+    MembershipDiagnostics(MembershipDiagnosticsSummary),
     SpaceProtection(SpaceProtectionSummary),
     SearchPage(SearchPageSummary),
     SearchTags(Vec<SearchTagSummary>),
@@ -580,6 +544,86 @@ pub enum OperationResult {
     EntryResent(ResendEntryOutcome),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceGroupChoicesSummary {
+    pub revision: u64,
+    pub device_trust: DeviceTrustSnapshotSummary,
+    pub issues: Vec<DeviceGroupChoiceIssueSummary>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceGroupChoiceIssueSummary {
+    pub issue_id: String,
+    pub choices: Vec<DeviceGroupChoiceOptionSummary>,
+    #[serde(default)]
+    pub reason: super::DeviceGroupChoiceReasonSummary,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceGroupChoiceOptionSummary {
+    pub choice_id: String,
+    pub is_current_group: bool,
+    pub requires_re_pairing: bool,
+    pub member_device_ids: Vec<String>,
+    pub members_complete: bool,
+    #[serde(default)]
+    pub members: Vec<super::DeviceGroupChoiceMemberSummary>,
+    #[serde(default)]
+    pub source_device_ids: Vec<String>,
+    pub impact: Option<super::DeviceGroupChoiceImpactSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceGroupChoiceOutcomeSummary {
+    Completed,
+    Pending,
+    RePairingRequired,
+    AlreadyCompleted,
+    StateChanged,
+    LocalDeviceConfirmationRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceGroupChoiceResultSummary {
+    pub outcome: DeviceGroupChoiceOutcomeSummary,
+    pub current_revision: Option<u64>,
+}
+
+#[cfg(feature = "dev-tools")]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipDiagnosticsSummary {
+    pub revision: u64,
+    pub branch_id: String,
+    pub head_event_id: String,
+    pub group_epoch: u64,
+    pub effective_member_count: u32,
+    pub pending_conflict_count: u32,
+    pub pending_confirmation_count: u32,
+    pub pending_effect_count: u32,
+    pub transition_phases: Vec<String>,
+}
+
+#[cfg(feature = "dev-tools")]
+impl fmt::Debug for MembershipDiagnosticsSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MembershipDiagnosticsSummary")
+            .field("identifiers", &"[REDACTED]")
+            .field("revision", &self.revision)
+            .field("group_epoch", &self.group_epoch)
+            .field("effective_member_count", &self.effective_member_count)
+            .field("pending_conflict_count", &self.pending_conflict_count)
+            .field(
+                "pending_confirmation_count",
+                &self.pending_confirmation_count,
+            )
+            .field("pending_effect_count", &self.pending_effect_count)
+            .field("transition_phases", &self.transition_phases)
+            .finish()
+    }
+}
+
 impl fmt::Debug for OperationResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("OperationResult");
@@ -596,9 +640,6 @@ impl fmt::Debug for OperationResult {
             Self::SpaceReset => debug.field("kind", &"space_reset"),
             Self::SpaceFactoryReset => debug.field("kind", &"space_factory_reset"),
             Self::SetupState(state) => debug.field("kind", &"setup_state").field("state", state),
-            Self::PairingDiagnostics(diagnostics) => debug
-                .field("kind", &"pairing_diagnostics")
-                .field("diagnostics", diagnostics),
             Self::StorageStats(stats) => {
                 debug.field("kind", &"storage_stats").field("stats", stats)
             }
@@ -614,6 +655,9 @@ impl fmt::Debug for OperationResult {
             Self::PeerConnectionsRefreshed(report) => debug
                 .field("kind", &"peer_connections_refreshed")
                 .field("report", report),
+            Self::ConnectivityOpportunityAccepted => {
+                debug.field("kind", &"connectivity_opportunity_accepted")
+            }
             Self::NetworkRecovered => debug.field("kind", &"network_recovered"),
             Self::NetworkRecoveryStatus(status) => debug
                 .field("kind", &"network_recovery_status")
@@ -724,7 +768,7 @@ impl fmt::Debug for OperationResult {
             Self::MemberSyncPreferences(preferences) => debug
                 .field("kind", &"member_sync_preferences")
                 .field("preferences", preferences),
-            Self::WorkspaceConvergence(summary) => debug
+            Self::WorkspaceMembership(summary) => debug
                 .field("kind", &"workspace_convergence")
                 .field("summary", summary),
             Self::DeviceTrust(summary) => debug
@@ -732,22 +776,16 @@ impl fmt::Debug for OperationResult {
                 .field("revision", &summary.revision)
                 .field("device_count", &summary.devices.len())
                 .field("has_current_change", &summary.current_change.is_some()),
-            Self::DeviceTrustDecision(result) => {
-                debug.field("kind", &"device_trust_decision").field(
-                    "outcome",
-                    &match result {
-                        DeviceTrustDecisionSummary::Applied { .. } => "applied",
-                        DeviceTrustDecisionSummary::KeptCurrentDeviceGroup { .. } => {
-                            "kept_current_device_group"
-                        }
-                        DeviceTrustDecisionSummary::AlreadyCompleted { .. } => "already_completed",
-                        DeviceTrustDecisionSummary::StateChanged { .. } => "state_changed",
-                        DeviceTrustDecisionSummary::LocalDeviceConfirmationRequired { .. } => {
-                            "local_device_confirmation_required"
-                        }
-                    },
-                )
-            }
+            Self::DeviceGroupChoices(summary) => debug
+                .field("kind", &"device_group_choices")
+                .field("issue_count", &summary.issues.len()),
+            Self::DeviceGroupChosen(summary) => debug
+                .field("kind", &"device_group_chosen")
+                .field("outcome", &summary.outcome),
+            #[cfg(feature = "dev-tools")]
+            Self::MembershipDiagnostics(summary) => debug
+                .field("kind", &"membership_diagnostics")
+                .field("summary", summary),
             Self::SpaceProtection(summary) => debug
                 .field("kind", &"space_protection")
                 .field("summary", summary),
@@ -834,6 +872,7 @@ impl fmt::Debug for OperationResult {
 #[derive(Clone, PartialEq, Eq)]
 pub struct SetupInvitationSummary {
     pub invitation_code: String,
+    pub full_invitation: String,
     pub expires_at_ms: i64,
 }
 
@@ -842,6 +881,7 @@ impl fmt::Debug for SetupInvitationSummary {
         formatter
             .debug_struct("SetupInvitationSummary")
             .field("invitation_code", &"[REDACTED]")
+            .field("full_invitation", &"[REDACTED]")
             .field("expires_at_ms", &self.expires_at_ms)
             .finish()
     }
@@ -973,6 +1013,7 @@ pub enum DeviceReachabilitySummary {
 #[serde(rename_all = "snake_case")]
 pub enum DeviceGroupRelationshipSummary {
     Consistent,
+    ConfirmationPending,
     PendingLocalDecision,
     Diverged,
     Unverifiable,
@@ -1100,32 +1141,6 @@ impl DeviceTrustSnapshotSummary {
             updated_at_ms: 0,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum DeviceTrustDecisionSummary {
-    Applied {
-        change_id: String,
-        snapshot: Box<DeviceTrustSnapshotSummary>,
-    },
-    KeptCurrentDeviceGroup {
-        change_id: String,
-        snapshot: Box<DeviceTrustSnapshotSummary>,
-    },
-    AlreadyCompleted {
-        change_id: String,
-        completed_choice: crate::DeviceTrustChoiceSummary,
-        snapshot: Box<DeviceTrustSnapshotSummary>,
-    },
-    StateChanged {
-        current_change_id: Option<String>,
-        snapshot: Box<DeviceTrustSnapshotSummary>,
-    },
-    LocalDeviceConfirmationRequired {
-        change_id: String,
-        snapshot: Box<DeviceTrustSnapshotSummary>,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1336,5 +1351,18 @@ impl fmt::Debug for SearchStatusSummary {
                 &self.last_rebuild_completed_at_ms,
             )
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeviceGroupRelationshipSummary;
+
+    #[test]
+    fn confirmation_pending_relationship_has_a_stable_wire_value() {
+        let encoded = serde_json::to_string(&DeviceGroupRelationshipSummary::ConfirmationPending)
+            .expect("serialize relationship");
+
+        assert_eq!(encoded, "\"confirmation_pending\"");
     }
 }

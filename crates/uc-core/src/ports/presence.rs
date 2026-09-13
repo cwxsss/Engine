@@ -29,7 +29,7 @@ pub enum ReachabilityState {
 
 /// Notification delivered on state change.
 #[derive(Debug, Clone)]
-pub struct PresenceEvent {
+pub struct PeerReachabilityChanged {
     pub device_id: DeviceId,
     pub state: ReachabilityState,
     pub at: DateTime<Utc>,
@@ -42,12 +42,23 @@ pub enum PresenceError {
     /// "member is offline" rather than a fatal error.
     #[error("no known address for device {0:?}")]
     NoAddress(DeviceId),
-    #[error("internal: {0}")]
-    Internal(String),
+    #[error("internal presence failure")]
+    Internal {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+impl PresenceError {
+    pub fn internal(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Internal {
+            source: Box::new(source),
+        }
+    }
 }
 
 #[async_trait]
-pub trait PresencePort: Send + Sync {
+pub trait PeerReachabilityPort: Send + Sync {
     /// Actively probe / dial the target device.
     ///
     /// Returns the resulting state — typically `Online` on success, `Offline`
@@ -86,7 +97,7 @@ pub trait PresencePort: Send + Sync {
     ///   `device`, so the next [`current_state`] / [`ensure_reachable`] call
     ///   observes the failure rather than a stale Online assumption.
     /// * Persist `Offline` as the device's last observed state.
-    /// * Emit a single [`PresenceEvent`] with `state = Offline` on the
+    /// * Emit a single [`PeerReachabilityChanged`] with `state = Offline` on the
     ///   subscription channel.
     ///
     /// Idempotent: calling on a device already known Offline is a no-op
@@ -131,5 +142,5 @@ pub trait PresencePort: Send + Sync {
     /// Each call returns a fresh receiver. Lagging receivers drop messages
     /// per `broadcast` contract — acceptable because the latest state can
     /// always be recovered via [`current_state`].
-    fn subscribe(&self) -> broadcast::Receiver<PresenceEvent>;
+    fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
 }

@@ -6,6 +6,7 @@ members = [
   "crates/uc-infra",
   "crates/uc-content-hash",
   "crates/uc-observability-contract",
+  "crates/uc-observability-runtime",
   "bindings/uc-engine-uniffi",
   "bindings/uc-ohos-napi",
   "compatibility/uc-mobile-proto",
@@ -17,7 +18,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.1.0-rc8"
+version = "1.1.0-rc.15"
 license = "Apache-2.0"
 
 [workspace.lints.clippy]
@@ -26,6 +27,9 @@ expect_used = "warn"
 print_stdout = "warn"
 print_stderr = "warn"
 dbg_macro = "warn"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
 # Keep the audited UniClipboard fix for HashContext::persist().
 [patch.crates-io]

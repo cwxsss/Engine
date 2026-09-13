@@ -12,18 +12,18 @@ use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::clipboard::{ClipboardEventRepositoryPort, ListClipboardEntriesPort};
 use uc_core::ports::{
     ClockPort, DeviceIdentityPort, EntryDeliveryRepositoryPort, PeerAddressRepositoryPort,
-    PresencePort, ReachabilityState, SettingsPort,
+    PeerReachabilityPort, ReachabilityState, SettingsPort,
 };
 
 use crate::clipboard::inbound::ClipboardInboundRuntime;
 use crate::clipboard::outbound::{
     ClipboardOutboundError, ClipboardOutboundFacade, ClipboardOutboundInput,
-    ClipboardOutboundOutcome, ResendEntryCommand, ResendEntryError, ResendReport,
+    ClipboardOutboundOutcome, ResendEntryError, ResendReport,
 };
 const RECOVERY_PAGE_SIZE: usize = 256;
 
-/// The complete automatic outbound lifecycle. Callers submit local captures
-/// and manual resends here; peer recovery stays internal to this runtime.
+/// 自动出站的完整生命周期。调用方只提交本地捕获；手动重发使用独立
+/// facade，离线恢复保持为本运行期的内部责任。
 pub struct ClipboardSyncRuntime {
     outbound: Arc<ClipboardOutboundFacade>,
     settings: Arc<dyn SettingsPort>,
@@ -36,7 +36,7 @@ pub struct ClipboardSyncRuntimeDeps {
     pub outbound: Arc<ClipboardOutboundFacade>,
     pub settings: Arc<dyn SettingsPort>,
     pub inbound: ClipboardInboundRuntime,
-    pub presence: Arc<dyn PresencePort>,
+    pub presence: Arc<dyn PeerReachabilityPort>,
     pub known_peers: Arc<dyn PeerAddressRepositoryPort>,
     pub entries: Arc<dyn ListClipboardEntriesPort>,
     pub events: Arc<dyn ClipboardEventRepositoryPort>,
@@ -67,16 +67,6 @@ impl ClipboardSyncRuntime {
             delivery_gate,
             recovery,
         }
-    }
-
-    /// Sends a newly captured local clipboard entry only when automatic sync
-    /// is enabled. A disabled capture creates no delivery attempt, so it can
-    /// never become a later recovery candidate.
-    pub async fn dispatch_local_capture(
-        &self,
-        input: ClipboardOutboundInput,
-    ) -> Result<ClipboardOutboundOutcome, ClipboardOutboundError> {
-        self.dispatch_local_capture_to_targets(input, None).await
     }
 
     /// Sends a local capture through the complete automatic-delivery
@@ -113,18 +103,6 @@ impl ClipboardSyncRuntime {
         Ok(outcome)
     }
 
-    /// Manual resend remains independent of the automatic-sync toggle, but it
-    /// still requires the global synchronization permission.
-    pub async fn resend_entry(
-        &self,
-        command: ResendEntryCommand,
-    ) -> Result<ResendReport, ResendEntryError> {
-        if !sync_enabled(self.settings.as_ref()).await {
-            return Err(ResendEntryError::SynchronizationDisabled);
-        }
-        self.outbound.resend_entry(command).await
-    }
-
     pub async fn shutdown(&self) {
         self.recovery.shutdown().await;
         if let Some(inbound) = self.inbound.lock().await.take() {
@@ -134,19 +112,6 @@ impl ClipboardSyncRuntime {
                     "clipboard sync: inbound runtime stopped unexpectedly"
                 );
             }
-        }
-    }
-}
-
-async fn sync_enabled(settings: &dyn SettingsPort) -> bool {
-    match settings.load().await {
-        Ok(settings) => settings.sync.sync_enabled,
-        Err(_) => {
-            warn!(
-                error_kind = "settings_load",
-                "clipboard sync: delivery skipped"
-            );
-            false
         }
     }
 }
@@ -189,7 +154,7 @@ impl RecoveryDeliveryPort for ClipboardOutboundFacade {
 }
 
 struct OfflineDeliveryRecoveryDeps {
-    presence: Arc<dyn PresencePort>,
+    presence: Arc<dyn PeerReachabilityPort>,
     known_peers: Arc<dyn PeerAddressRepositoryPort>,
     settings: Arc<dyn SettingsPort>,
     entries: Arc<dyn ListClipboardEntriesPort>,
@@ -247,7 +212,6 @@ impl OfflineDeliveryRecovery {
             if !supersede_older_unreachable_entries(&self.deps, entry_id, target).await {
                 warn!(
                     entry_id = %entry_id,
-                    target = %target,
                     "clipboard delivery recovery: unable to replace older offline content"
                 );
             }
@@ -344,7 +308,6 @@ async fn recover_for_target(deps: &OfflineDeliveryRecoveryDeps, target: DeviceId
             if !supersede_older_unreachable_entries(deps, &entry.entry_id, &target).await {
                 warn!(
                     entry_id = %entry.entry_id,
-                    target = %target,
                     "clipboard delivery recovery: unable to replace older offline content"
                 );
                 return;
@@ -362,7 +325,6 @@ async fn recover_for_target(deps: &OfflineDeliveryRecoveryDeps, target: DeviceId
             {
                 Ok(report) => info!(
                     entry_id = %entry.entry_id,
-                    target = %target,
                     accepted = report.accepted,
                     duplicate = report.duplicate,
                     offline = report.offline,
@@ -379,7 +341,7 @@ async fn recover_for_target(deps: &OfflineDeliveryRecoveryDeps, target: DeviceId
                     }
                 }
                 Err(_) => {
-                    debug!(error_kind = "delivery", entry_id = %entry.entry_id, target = %target, "clipboard delivery recovery skipped entry");
+                    debug!(error_kind = "delivery", entry_id = %entry.entry_id, "clipboard delivery recovery skipped entry");
                 }
             }
             return;
@@ -487,7 +449,7 @@ mod tests {
 
     use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError};
     use uc_core::ids::{EntryId, EventId};
-    use uc_core::ports::presence::{PresenceError, PresenceEvent};
+    use uc_core::ports::presence::{PeerReachabilityChanged, PresenceError};
     use uc_core::settings::model::Settings;
 
     struct FixedSettings {
@@ -623,11 +585,11 @@ mod tests {
     }
 
     struct IdlePresence {
-        tx: tokio::sync::broadcast::Sender<PresenceEvent>,
+        tx: tokio::sync::broadcast::Sender<PeerReachabilityChanged>,
     }
 
     #[async_trait]
-    impl PresencePort for IdlePresence {
+    impl PeerReachabilityPort for IdlePresence {
         async fn ensure_reachable(
             &self,
             _device: &DeviceId,
@@ -639,7 +601,7 @@ mod tests {
             ReachabilityState::Unknown
         }
 
-        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PresenceEvent> {
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PeerReachabilityChanged> {
             self.tx.subscribe()
         }
     }

@@ -1,29 +1,23 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use napi::bindgen_prelude::Uint8Array;
+use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
-    CancelJoinSpaceInput, ClipboardRestoreMode, ClipboardRestoreOutcome, ContentTypesPatch,
-    ContentTypesSummary, CreateSpaceInput, DecideDeviceTrustChangeInput, DeviceTrustChoiceSummary,
-    Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput,
-    HostFileHandle, InvitationAvailability, JoinSpaceInput, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesSummary, NetworkSettingsPatch, Operation, OperationResult,
-    OperationTerminal, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
-    RelayProbeCredential, RelayProbeInput, RelayProbeOutcome, RemoveMemberInput,
+    CancelJoinSpaceInput, ChooseDeviceGroupInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
+    CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream,
+    ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation,
+    OperationResult, OperationTerminal, RecoverSessionInput, RefreshReason, RemoveMemberInput,
     RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
-    SendTextInput, SettingsPatch, SettingsUpdateOutcome, UpdateMemberSyncPreferencesInput,
+    SendTextInput,
 };
 use zeroize::Zeroizing;
 
 use crate::{
-    host, OhActiveClipboard, OhContentTypes, OhContentTypesPatch, OhEngineConfig, OhEngineEvent,
-    OhHost, OhInvitationIssued, OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice,
-    OhMemberSyncPreferences, OhMemberSyncPreferencesPatch, OhNetworkRecoveryStatus,
-    OhNetworkSettings, OhPairingCandidateDiagnostic, OhPairingDiagnostics,
-    OhPairingInboundDiagnostics, OhSendReport, OhSessionRecovery, OhSpaceCreated,
-    OhWorkspaceConvergence,
+    host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhSendReport,
+    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -99,6 +93,30 @@ impl OhEngine {
     }
 
     #[napi]
+    pub async fn notify_connectivity_opportunity(&self, reason: String) -> napi::Result<()> {
+        let reason = match reason.as_str() {
+            "foreground" => uc_engine::ConnectivityOpportunity::Foreground,
+            "system_wake" => uc_engine::ConnectivityOpportunity::SystemWake,
+            "network_changed" => uc_engine::ConnectivityOpportunity::NetworkChanged,
+            _ => {
+                return Err(napi::Error::new(
+                    Status::InvalidArg,
+                    "invalid connectivity opportunity",
+                ))
+            }
+        };
+        match self
+            .engine
+            .execute(Operation::NotifyConnectivityOpportunity { reason })
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::ConnectivityOpportunityAccepted => Ok(()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
     pub async fn recover_network(&self) -> napi::Result<()> {
         match self
             .engine
@@ -129,97 +147,6 @@ impl OhEngine {
     }
 
     #[napi]
-    pub async fn query_network_settings(&self) -> napi::Result<OhNetworkSettings> {
-        let result = self
-            .engine
-            .execute(Operation::QuerySettings)
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::Settings(settings) => Ok(network_settings(&settings)),
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn query_pairing_diagnostics(&self) -> napi::Result<OhPairingDiagnostics> {
-        match self
-            .engine
-            .execute(Operation::QueryPairingDiagnostics)
-            .await
-            .map_err(engine_error)?
-        {
-            OperationResult::PairingDiagnostics(diagnostics) => Ok(OhPairingDiagnostics {
-                candidate_count: diagnostics.candidates.len().min(u32::MAX as usize) as u32,
-                candidates: diagnostics
-                    .candidates
-                    .into_iter()
-                    .map(|candidate| OhPairingCandidateDiagnostic {
-                        kind: candidate.kind,
-                        address_hint: candidate.address_hint,
-                        port: u32::from(candidate.port),
-                    })
-                    .collect(),
-                inbound: OhPairingInboundDiagnostics {
-                    events_delivered: diagnostics.inbound.events_delivered,
-                    last_stage: diagnostics.inbound.last_stage,
-                    last_stage_elapsed_ms: diagnostics.inbound.last_stage_elapsed_ms as f64,
-                    last_failure: diagnostics.inbound.last_failure,
-                },
-            }),
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn update_network_settings(
-        &self,
-        allow_relay_fallback: bool,
-        custom_relay_urls: Vec<String>,
-    ) -> napi::Result<OhNetworkSettings> {
-        let result = self
-            .engine
-            .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
-                network: Some(NetworkSettingsPatch {
-                    allow_relay_fallback: Some(allow_relay_fallback),
-                    custom_relay_urls: Some(custom_relay_urls),
-                    ..NetworkSettingsPatch::default()
-                }),
-                ..SettingsPatch::default()
-            })))
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::SettingsUpdated(SettingsUpdateOutcome::Updated(settings)) => {
-                Ok(network_settings(&settings))
-            }
-            OperationResult::SettingsUpdated(SettingsUpdateOutcome::Rejected { reason }) => {
-                Err(napi::Error::new(Status::InvalidArg, reason))
-            }
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn probe_relay_url(&self, url: String) -> napi::Result<u32> {
-        let result = self
-            .engine
-            .execute(Operation::ProbeRelay(RelayProbeInput {
-                url,
-                credential: RelayProbeCredential::None,
-            }))
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::RelayProbed(RelayProbeOutcome::Success { latency_ms }) => {
-                Ok(latency_ms)
-            }
-            OperationResult::RelayProbed(outcome) => Err(relay_probe_error(outcome)),
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
     pub async fn query_local_device(&self) -> napi::Result<OhLocalDevice> {
         let result = self
             .engine
@@ -236,92 +163,42 @@ impl OhEngine {
     }
 
     #[napi]
-    pub async fn query_member_sync_preferences(
-        &self,
-        device_id: String,
-    ) -> napi::Result<OhMemberSyncPreferences> {
-        let result = self
-            .engine
-            .execute(Operation::QueryMemberSyncPreferences(
-                QueryMemberSyncPreferencesInput { device_id },
-            ))
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::MemberSyncPreferences(preferences) => {
-                Ok(member_sync_preferences(preferences))
-            }
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn update_member_sync_preferences(
-        &self,
-        device_id: String,
-        patch: OhMemberSyncPreferencesPatch,
-    ) -> napi::Result<OhMemberSyncPreferences> {
-        let result = self
-            .engine
-            .execute(Operation::UpdateMemberSyncPreferences(
-                UpdateMemberSyncPreferencesInput {
-                    device_id,
-                    patch: member_sync_preferences_patch(patch),
-                },
-            ))
-            .await
-            .map_err(engine_error)?;
-        match result {
-            OperationResult::MemberSyncPreferences(preferences) => {
-                Ok(member_sync_preferences(preferences))
-            }
-            _ => Err(unexpected_result()),
-        }
-    }
-
-    #[napi]
-    pub async fn query_device_trust(&self) -> napi::Result<String> {
+    pub async fn query_device_group_choices(&self) -> napi::Result<String> {
         match self
             .engine
-            .execute(Operation::QueryDeviceTrust)
+            .execute(Operation::QueryDeviceGroupChoices)
             .await
             .map_err(engine_error)?
         {
-            OperationResult::DeviceTrust(snapshot) => device_trust_json(snapshot),
+            OperationResult::DeviceGroupChoices(summary) => {
+                serde_json::to_string(&summary).map_err(|_| unexpected_result())
+            }
             _ => Err(unexpected_result()),
         }
     }
 
     #[napi]
-    pub async fn decide_device_trust_change(
+    pub async fn choose_device_group(
         &self,
-        change_id: String,
-        choice: String,
+        issue_id: String,
+        choice_id: String,
+        expected_revision: i64,
         confirm_local_removal: bool,
     ) -> napi::Result<String> {
-        let choice = match choice.as_str() {
-            "apply_change" => DeviceTrustChoiceSummary::ApplyChange,
-            "keep_current_device_group" => DeviceTrustChoiceSummary::KeepCurrentDeviceGroup,
-            _ => {
-                return Err(napi::Error::new(
-                    Status::InvalidArg,
-                    "invalid device trust choice",
-                ))
-            }
-        };
+        let expected_revision = u64::try_from(expected_revision)
+            .map_err(|_| napi::Error::new(Status::InvalidArg, "invalid revision"))?;
         match self
             .engine
-            .execute(Operation::DecideDeviceTrustChange(
-                DecideDeviceTrustChangeInput {
-                    change_id,
-                    choice,
-                    confirm_local_removal,
-                },
-            ))
+            .execute(Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+                issue_id,
+                choice_id,
+                expected_revision,
+                confirm_local_removal,
+            }))
             .await
             .map_err(engine_error)?
         {
-            OperationResult::DeviceTrustDecision(result) => {
+            OperationResult::DeviceGroupChosen(result) => {
                 serde_json::to_string(&result).map_err(|_| unexpected_result())
             }
             _ => Err(unexpected_result()),
@@ -336,7 +213,7 @@ impl OhEngine {
             .await
             .map_err(engine_error)?;
         match result {
-            OperationResult::WorkspaceConvergence(summary) => workspace_convergence(summary),
+            OperationResult::WorkspaceMembership(summary) => workspace_convergence(summary),
             _ => Err(unexpected_result()),
         }
     }
@@ -351,10 +228,12 @@ impl OhEngine {
         match result {
             OperationResult::InvitationIssued {
                 invitation_code,
+                full_invitation,
                 expires_at_ms,
                 availability,
             } => Ok(OhInvitationIssued {
                 invitation_code,
+                full_invitation,
                 expires_at_ms: expires_at_ms as f64,
                 availability: invitation_availability(availability).to_owned(),
             }),
@@ -419,7 +298,7 @@ impl OhEngine {
     #[napi]
     pub async fn send_image(
         &self,
-        bytes: Uint8Array,
+        bytes: Buffer,
         mime_type: String,
         target_devices: Vec<String>,
     ) -> napi::Result<OhSendReport> {
@@ -548,7 +427,9 @@ impl OhEngine {
 
     #[napi]
     pub async fn suspend(&self) -> napi::Result<()> {
-        self.engine.suspend().await.map_err(engine_error)
+        let result = self.engine.suspend().await.map_err(engine_error);
+        crate::observability::schedule_flush_after_success(&result);
+        result
     }
 
     #[napi]
@@ -574,75 +455,13 @@ impl OhEngine {
 
     #[napi]
     pub async fn shutdown(&self, deadline_ms: u32) -> napi::Result<()> {
-        self.engine
+        let result = self
+            .engine
             .shutdown(Duration::from_millis(u64::from(deadline_ms)))
             .await
-            .map_err(engine_error)
-    }
-}
-
-fn member_sync_preferences(summary: MemberSyncPreferencesSummary) -> OhMemberSyncPreferences {
-    OhMemberSyncPreferences {
-        send_enabled: summary.send_enabled,
-        receive_enabled: summary.receive_enabled,
-        send_content_types: content_types(summary.send_content_types),
-        receive_content_types: content_types(summary.receive_content_types),
-    }
-}
-
-fn network_settings(summary: &uc_engine::SettingsSummary) -> OhNetworkSettings {
-    OhNetworkSettings {
-        allow_relay_fallback: summary.network.allow_relay_fallback,
-        custom_relay_urls: summary.network.custom_relay_urls.clone(),
-    }
-}
-
-fn relay_probe_error(outcome: RelayProbeOutcome) -> napi::Error {
-    let message = match outcome {
-        RelayProbeOutcome::InvalidUrl { message }
-        | RelayProbeOutcome::Dns { message }
-        | RelayProbeOutcome::Tls { message }
-        | RelayProbeOutcome::Handshake { message }
-        | RelayProbeOutcome::Other { message } => message,
-        RelayProbeOutcome::Timeout => "relay probe timed out".to_owned(),
-        RelayProbeOutcome::Success { .. } => "unexpected successful relay probe".to_owned(),
-    };
-    napi::Error::new(
-        Status::GenericFailure,
-        format!("relay probe failed: {message}"),
-    )
-}
-
-fn content_types(summary: ContentTypesSummary) -> OhContentTypes {
-    OhContentTypes {
-        text: summary.text,
-        image: summary.image,
-        link: summary.link,
-        file: summary.file,
-        code_snippet: summary.code_snippet,
-        rich_text: summary.rich_text,
-    }
-}
-
-fn member_sync_preferences_patch(
-    patch: OhMemberSyncPreferencesPatch,
-) -> MemberSyncPreferencesPatch {
-    MemberSyncPreferencesPatch {
-        send_enabled: patch.send_enabled,
-        receive_enabled: patch.receive_enabled,
-        send_content_types: patch.send_content_types.map(content_types_patch),
-        receive_content_types: patch.receive_content_types.map(content_types_patch),
-    }
-}
-
-fn content_types_patch(patch: OhContentTypesPatch) -> ContentTypesPatch {
-    ContentTypesPatch {
-        text: patch.text,
-        image: patch.image,
-        link: patch.link,
-        file: patch.file,
-        code_snippet: patch.code_snippet,
-        rich_text: patch.rich_text,
+            .map_err(engine_error);
+        crate::observability::schedule_flush_after_success(&result);
+        result
     }
 }
 
@@ -694,6 +513,7 @@ fn workspace_convergence(
     })
 }
 
+#[cfg(test)]
 fn device_trust_json(summary: uc_engine::DeviceTrustSnapshotSummary) -> napi::Result<String> {
     serde_json::to_string(&summary).map_err(|_| unexpected_result())
 }
@@ -706,6 +526,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
         uc_engine::JoinSpaceStatusSummary::Active {
             join_id,
             joined_space,
+            peer_upgrade_required,
         } => OhJoinSpaceStatus {
             status: "active".to_owned(),
             join_id,
@@ -724,6 +545,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id: None,
             sponsor_identity_fingerprint: None,
             cancel_requested: None,
+            peer_upgrade_required,
             rejection_reason: None,
         },
         uc_engine::JoinSpaceStatusSummary::Pending {
@@ -732,6 +554,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested,
+            peer_upgrade_required,
         } => OhJoinSpaceStatus {
             status: "pending".to_owned(),
             join_id,
@@ -740,6 +563,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id,
             sponsor_identity_fingerprint,
             cancel_requested: Some(cancel_requested),
+            peer_upgrade_required,
             rejection_reason: None,
         },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => OhJoinSpaceStatus {
@@ -750,6 +574,7 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             sponsor_device_id: None,
             sponsor_identity_fingerprint: None,
             cancel_requested: None,
+            peer_upgrade_required: false,
             rejection_reason: Some(
                 match reason {
                     uc_engine::JoinSpaceRejectionReasonSummary::InvitationUnavailable => {
@@ -940,11 +765,11 @@ fn invalid_restore_mode() -> napi::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        count, device_trust_json, engine_error, map_event, member_sync_preferences,
-        workspace_convergence,
+        count, device_trust_json, engine_error, join_space_status, map_event, workspace_convergence,
     };
     use uc_engine::{
-        EngineError, EngineErrorCategory, EngineEvent, OperationTerminal, RefreshReason,
+        EngineError, EngineErrorCategory, EngineEvent, OperationResult, OperationTerminal,
+        RefreshReason,
     };
 
     #[test]
@@ -1036,6 +861,23 @@ mod tests {
     }
 
     #[test]
+    fn join_status_preserves_the_peer_upgrade_prompt() {
+        let status = join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Pending {
+                join_id: "join-id".to_owned(),
+                target_space_id: None,
+                sponsor_device_id: None,
+                sponsor_identity_fingerprint: None,
+                cancel_requested: false,
+                peer_upgrade_required: true,
+            },
+        ))
+        .expect("join status must map");
+
+        assert!(status.peer_upgrade_required);
+    }
+
+    #[test]
     fn oversized_delivery_counts_are_rejected() {
         assert!(count(usize::MAX).is_err());
     }
@@ -1088,40 +930,5 @@ mod tests {
         assert!(json.contains("recovery"));
         assert!(json.contains("allowed_actions"));
         assert!(json.contains("blocked_reason"));
-    }
-
-    #[test]
-    fn member_sync_preferences_mapping_keeps_all_stable_fields() {
-        let preferences = member_sync_preferences(uc_engine::MemberSyncPreferencesSummary {
-            send_enabled: false,
-            receive_enabled: true,
-            send_content_types: uc_engine::ContentTypesSummary {
-                text: false,
-                image: true,
-                link: false,
-                file: true,
-                code_snippet: false,
-                rich_text: true,
-            },
-            receive_content_types: uc_engine::ContentTypesSummary {
-                text: true,
-                image: false,
-                link: true,
-                file: false,
-                code_snippet: true,
-                rich_text: false,
-            },
-        });
-
-        assert!(!preferences.send_enabled);
-        assert!(preferences.receive_enabled);
-        assert!(!preferences.send_content_types.text);
-        assert!(preferences.send_content_types.image);
-        assert!(preferences.send_content_types.file);
-        assert!(preferences.send_content_types.rich_text);
-        assert!(preferences.receive_content_types.text);
-        assert!(preferences.receive_content_types.link);
-        assert!(preferences.receive_content_types.code_snippet);
-        assert!(!preferences.receive_content_types.rich_text);
     }
 }

@@ -222,14 +222,27 @@ fn ohos_probe_starts_the_engine_with_real_host_capabilities() {
 
     assert!(declarations.contains("prepareHost(host: OhHost): PreparedHost"));
     assert!(declarations.contains("export type PreparedHost = object"));
+    assert!(declarations.contains("installProcessObservability("));
+    assert!(declarations.contains("shutdownProcessObservability(deadlineMs: number)"));
     assert!(declarations.contains("Promise<OhSpaceCreated>"));
     assert!(declarations.contains("startEngine("));
     assert!(declarations.contains("recoverSession(allowSecureStorageUnlock: boolean)"));
     assert!(declarations.contains("exportEntry(entryId: string, destinationHandle: string)"));
     assert!(runtime.contains("createEngineHost"));
+    assert!(runtime.contains("engine.installProcessObservability"));
     assert!(runtime.contains("engine.prepareHost"));
     assert!(runtime.contains("engine.startEngine"));
     assert!(runtime.contains("active.recoverSession(true)"));
+}
+
+#[test]
+fn ohos_probe_closes_process_observability_only_at_process_exit() {
+    let runtime = read("tests/hosts/ohos/entry/src/main/ets/host/EngineRuntime.ets");
+    let ability = read("tests/hosts/ohos/entry/src/main/ets/entryability/EntryAbility.ets");
+
+    assert!(runtime.contains("await engine.shutdownProcessObservability(1_000)"));
+    assert!(ability.contains("onDestroy(): void"));
+    assert!(ability.contains("engineRuntime.shutdown()"));
 }
 
 #[test]
@@ -242,42 +255,6 @@ fn ohos_binding_exposes_the_active_clipboard_query() {
     assert!(runtime.contains("pub async fn query_active_clipboard"));
     assert!(declarations.contains("export interface OhActiveClipboard"));
     assert!(declarations.contains("queryActiveClipboard(): Promise<OhActiveClipboard | null>"));
-}
-
-#[test]
-fn ohos_binding_exposes_redacted_pairing_diagnostics() {
-    let declarations = read("bindings/uc-ohos-napi/ohos/index.d.ts");
-    let library = read("bindings/uc-ohos-napi/src/lib.rs");
-    let runtime = read("bindings/uc-ohos-napi/src/runtime.rs");
-
-    for symbol in [
-        "pub struct OhPairingCandidateDiagnostic",
-        "pub struct OhPairingInboundDiagnostics",
-        "pub struct OhPairingDiagnostics",
-    ] {
-        assert!(library.contains(symbol), "missing N-API object: {symbol}");
-    }
-    for method in [
-        "pub async fn query_pairing_diagnostics",
-        "Operation::QueryPairingDiagnostics",
-        "OperationResult::PairingDiagnostics",
-    ] {
-        assert!(
-            runtime.contains(method),
-            "missing runtime contract: {method}"
-        );
-    }
-    for declaration in [
-        "export interface OhPairingCandidateDiagnostic",
-        "export interface OhPairingInboundDiagnostics",
-        "export interface OhPairingDiagnostics",
-        "queryPairingDiagnostics(): Promise<OhPairingDiagnostics>",
-    ] {
-        assert!(
-            declarations.contains(declaration),
-            "missing ArkTS declaration: {declaration}"
-        );
-    }
 }
 
 #[test]

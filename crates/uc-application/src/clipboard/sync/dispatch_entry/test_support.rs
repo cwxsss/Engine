@@ -20,8 +20,8 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ClipboardDispatchPort, ClipboardHeader, ClockPort, DispatchReport, FirstSyncStateError,
     FirstSyncStatePort, LocalIdentityError, LocalIdentityPort, PeerAddressError, PeerAddressRecord,
-    PeerAddressRepositoryPort, PresenceError, PresenceEvent, PresencePort, ReachabilityState,
-    SettingsPort, SyncPayload,
+    PeerAddressRepositoryPort, PeerReachabilityChanged, PeerReachabilityPort, PresenceError,
+    ReachabilityState, SettingsPort, SyncPayload,
 };
 use uc_core::security::IdentityFingerprint;
 use uc_core::settings::model::Settings;
@@ -111,7 +111,7 @@ impl ClockPort for FixedClock {
 /// are present to satisfy the trait.
 pub(crate) struct StaticPresence(pub(crate) ReachabilityState);
 #[async_trait]
-impl PresencePort for StaticPresence {
+impl PeerReachabilityPort for StaticPresence {
     async fn ensure_reachable(
         &self,
         _device: &DeviceId,
@@ -123,7 +123,7 @@ impl PresencePort for StaticPresence {
         self.0
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<PresenceEvent> {
+    fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged> {
         let (_tx, rx) = broadcast::channel(1);
         rx
     }
@@ -248,7 +248,6 @@ pub(crate) fn dispatch_input() -> DispatchClipboardEntryInput {
         categories: ClipboardContentCategorySet::empty(),
         entry_id: None,
         target_filter: None,
-        source_started_at: None,
     }
 }
 
@@ -262,7 +261,6 @@ pub(crate) fn test_header() -> ClipboardHeader {
         origin_device_id: "self-device".to_string(),
         origin_device_name: "Self".to_string(),
         payload_version: 3,
-        flow_id: None,
     }
 }
 

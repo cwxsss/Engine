@@ -9,13 +9,8 @@ use crate::operations::clipboard::query_active::execute_query_active_clipboard;
 use crate::operations::clipboard::restore::execute_restore_clipboard;
 use crate::operations::device::device::execute_query_local_device;
 use crate::operations::device::member::{
-    execute_decide_device_trust_change, execute_list_devices,
-    execute_query_member_sync_preferences, execute_query_profile_device_trust,
-    execute_query_space_protection, execute_remove_member, execute_update_member_sync_preferences,
-};
-#[cfg(feature = "dev-tools")]
-use crate::operations::device::member::{
-    execute_decide_membership_removal, execute_query_workspace_convergence,
+    execute_list_devices, execute_query_member_sync_preferences, execute_query_space_protection,
+    execute_remove_member, execute_update_member_sync_preferences,
 };
 use crate::operations::device::peer_connections::{
     execute_query_peer_connections, execute_refresh_peer_connections,
@@ -60,10 +55,14 @@ use crate::operations::settings::upgrade::{
 use crate::operations::space::cancel_invitation::execute_cancel_invitation;
 use crate::operations::space::cancel_join_space::execute_cancel_join_space;
 use crate::operations::space::create_space::execute_create_space;
+use crate::operations::space::device_group_choice::{
+    execute_choose_device_group, execute_query_device_group_choices,
+};
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::operations::space::invitation::execute_issue_invitation;
-use crate::operations::space::join_space::{current_join_result, execute_join_space};
-use crate::operations::space::pairing_diagnostics::execute_query_pairing_diagnostics;
+use crate::operations::space::join_space::execute_join_space;
+#[cfg(feature = "dev-tools")]
+use crate::operations::space::membership_diagnostics::execute_query_membership_diagnostics;
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
@@ -80,11 +79,22 @@ impl EngineRuntime for ProductionRuntime {
         cancellation: CancellationToken,
     ) -> Result<OperationResult, EngineError> {
         match operation {
-            Operation::QueryDeviceTrust => {
-                return execute_query_profile_device_trust(self.profile_convergence.as_ref()).await;
+            Operation::QueryDeviceGroupChoices => {
+                return execute_query_device_group_choices(self.current_facade().await?.as_ref())
+                    .await;
+            }
+            Operation::ChooseDeviceGroup(input) => {
+                return execute_choose_device_group(self.current_facade().await?.as_ref(), input)
+                    .await;
+            }
+            #[cfg(feature = "dev-tools")]
+            Operation::QueryMembershipDiagnostics => {
+                return execute_query_membership_diagnostics(self.current_facade().await?.as_ref())
+                    .await;
             }
             Operation::CancelJoinSpace(input) => {
-                return execute_cancel_join_space(self.profile_convergence.as_ref(), input).await;
+                return execute_cancel_join_space(self.current_facade().await?.as_ref(), input)
+                    .await;
             }
             Operation::FactoryResetSpace => {
                 return execute_factory_reset_space(self.profile_reset.as_ref()).await;
@@ -139,7 +149,6 @@ impl EngineRuntime for ProductionRuntime {
             .as_ref()
             .ok_or_else(super::operation_unavailable_error)?
             .cancellation();
-        let may_require_session_transition = matches!(&operation, Operation::JoinSpace(_));
         let operation_kind = operation.kind();
         let operation = async {
             match operation {
@@ -153,12 +162,7 @@ impl EngineRuntime for ProductionRuntime {
                     execute_recover_session(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::JoinSpace(input) => {
-                    execute_join_space(
-                        self.current_facade().await?.as_ref(),
-                        self.profile_convergence.as_ref(),
-                        input,
-                    )
-                    .await
+                    execute_join_space(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::IssueInvitation => {
                     execute_issue_invitation(self.current_facade().await?.as_ref()).await
@@ -178,9 +182,6 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::QuerySetupState => {
                     execute_query_setup_state(self.current_facade().await?.as_ref()).await
                 }
-                Operation::QueryPairingDiagnostics => {
-                    execute_query_pairing_diagnostics(self.current_facade().await?.as_ref()).await
-                }
                 Operation::QueryStorageStats => {
                     execute_query_storage_stats(self.current_facade().await?.as_ref()).await
                 }
@@ -192,6 +193,24 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::QueryPeerConnections => {
                     execute_query_peer_connections(self.current_facade().await?.as_ref()).await
+                }
+                Operation::NotifyConnectivityOpportunity { reason } => {
+                    let reason = match reason {
+                        crate::ConnectivityOpportunity::Foreground => {
+                            uc_application::facade::ConnectivityOpportunity::Foreground
+                        }
+                        crate::ConnectivityOpportunity::SystemWake => {
+                            uc_application::facade::ConnectivityOpportunity::SystemWake
+                        }
+                        crate::ConnectivityOpportunity::NetworkChanged => {
+                            uc_application::facade::ConnectivityOpportunity::NetworkChanged
+                        }
+                    };
+                    self.current_facade()
+                        .await?
+                        .notify_connectivity_opportunity(reason)
+                        .map_err(|_| super::operation_unavailable_error())?;
+                    Ok(OperationResult::ConnectivityOpportunityAccepted)
                 }
                 Operation::RefreshPeerConnections => {
                     execute_refresh_peer_connections(self.current_facade().await?.as_ref()).await
@@ -330,17 +349,12 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::ListDevices => {
                     execute_list_devices(self.current_facade().await?.as_ref()).await
                 }
-                #[cfg(feature = "dev-tools")]
-                Operation::QueryWorkspaceConvergence => {
-                    execute_query_workspace_convergence(self.current_facade().await?.as_ref()).await
-                }
-                Operation::QueryDeviceTrust
+                Operation::QueryDeviceGroupChoices
                 | Operation::CancelJoinSpace(_)
                 | Operation::FactoryResetSpace => Err(super::operation_unavailable_error()),
-                Operation::DecideDeviceTrustChange(input) => {
-                    execute_decide_device_trust_change(self.current_facade().await?.as_ref(), input)
-                        .await
-                }
+                Operation::ChooseDeviceGroup(_) => Err(super::operation_unavailable_error()),
+                #[cfg(feature = "dev-tools")]
+                Operation::QueryMembershipDiagnostics => Err(super::operation_unavailable_error()),
                 Operation::QueryMemberSyncPreferences(input) => {
                     execute_query_member_sync_preferences(
                         self.current_facade().await?.as_ref(),
@@ -357,11 +371,6 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::RemoveMember(input) => {
                     execute_remove_member(self.current_facade().await?.as_ref(), input).await
-                }
-                #[cfg(feature = "dev-tools")]
-                Operation::DecideMembershipRemoval(input) => {
-                    execute_decide_membership_removal(self.current_facade().await?.as_ref(), input)
-                        .await
                 }
                 Operation::QuerySpaceProtection => {
                     execute_query_space_protection(self.current_facade().await?.as_ref()).await
@@ -454,8 +463,7 @@ impl EngineRuntime for ProductionRuntime {
                     })
                 }
                 Operation::QueryActiveClipboard => {
-                    execute_query_active_clipboard(self.current_active_clipboard().await?.as_ref())
-                        .await
+                    execute_query_active_clipboard(self.current_facade().await?.as_ref()).await
                 }
                 Operation::RestoreClipboard(input) => {
                     execute_restore_clipboard(self.current_facade().await?.as_ref(), input).await
@@ -467,11 +475,7 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::SendImage(input) => self.execute_send_image(input).await,
                 Operation::SendFiles(input) => self.execute_send_files(input, &cancellation).await,
                 Operation::ResendEntry(input) => {
-                    execute_resend_entry(
-                        self.current_clipboard_sync_runtime().await?.as_ref(),
-                        input,
-                    )
-                    .await
+                    execute_resend_entry(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::ExportEntry(input) => self.execute_export_entry(input).await,
             }
@@ -512,27 +516,6 @@ impl EngineRuntime for ProductionRuntime {
                         reason: crate::RefreshReason::StateInvalidated,
                     });
                 }
-            }
-        }
-        if may_require_session_transition && result.is_ok() {
-            let convergence = self
-                .current_session_field(|session| session.sync_engine.space_transition_recovery())
-                .await?;
-            if convergence
-                .requires_session_transition()
-                .await
-                .map_err(|error| {
-                    super::operation_error_with_code(1103, "inspect join space transition", error)
-                })?
-            {
-                self.session_supervisor
-                    .transition_session(
-                        session_lease
-                            .take()
-                            .ok_or_else(super::operation_unavailable_error)?,
-                    )
-                    .await?;
-                return current_join_result(self.profile_convergence.as_ref()).await;
             }
         }
         drop(session_lease);
@@ -640,6 +623,20 @@ impl EngineRuntime for ProductionRuntime {
                     digest: fetched.digest.as_bytes().to_vec(),
                 })
                 .map_err(|error| operation_error_with_code(1910, "fetch blob", error)),
+            crate::DevOperation::QueryNetworkEndpointId => self
+                .network_partition_gate
+                .local_endpoint_id()
+                .map(crate::DevOperationResult::NetworkEndpointId)
+                .ok_or_else(|| {
+                    EngineError::new(1911, crate::EngineErrorCategory::Unavailable, true)
+                }),
+            crate::DevOperation::SetNetworkPartition {
+                blocked_endpoint_ids,
+            } => Ok(crate::DevOperationResult::NetworkPartitionUpdated {
+                blocked_peer_count: self
+                    .network_partition_gate
+                    .replace_blocked(blocked_endpoint_ids),
+            }),
         }
     }
 
@@ -652,11 +649,12 @@ impl EngineRuntime for ProductionRuntime {
     }
 
     async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
+        self.security_lifecycle.close_security_session();
         self.network_recovery.shutdown().await;
         self.suspend().await?;
         self.session_supervisor.clear_factory();
         self.session_supervisor.close_file_transfers().await?;
-        self.task_registry.shutdown(deadline).await;
+        super::task_shutdown::shutdown_tasks(&self.task_registry, deadline).await;
         if let Err(error) = std::fs::remove_dir_all(&self.clipboard_import_root) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 warn!(error = %error, "failed to remove host clipboard imports");

@@ -15,6 +15,14 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ConnectivityOpportunity {
+    Foreground,
+    SystemWake,
+    NetworkChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     CreateSpace,
     JoinSpace,
@@ -26,12 +34,12 @@ pub enum OperationKind {
     ResetSpace,
     FactoryResetSpace,
     QuerySetupState,
-    QueryPairingDiagnostics,
     QueryStorageStats,
     ClearStorageCache,
     QueryLocalDevice,
     QueryPeerConnections,
     RefreshPeerConnections,
+    NotifyConnectivityOpportunity,
     RecoverNetwork,
     QueryNetworkRecoveryStatus,
     QuerySettings,
@@ -73,12 +81,10 @@ pub enum OperationKind {
     QueryMemberSyncPreferences,
     UpdateMemberSyncPreferences,
     RemoveMember,
+    QueryDeviceGroupChoices,
+    ChooseDeviceGroup,
     #[cfg(feature = "dev-tools")]
-    DecideMembershipRemoval,
-    #[cfg(feature = "dev-tools")]
-    QueryWorkspaceConvergence,
-    QueryDeviceTrust,
-    DecideDeviceTrustChange,
+    QueryMembershipDiagnostics,
     QuerySpaceProtection,
     SearchEntries,
     QuerySearchTags,
@@ -124,12 +130,12 @@ impl fmt::Display for OperationKind {
             Self::ResetSpace => "reset_space",
             Self::FactoryResetSpace => "factory_reset_space",
             Self::QuerySetupState => "query_setup_state",
-            Self::QueryPairingDiagnostics => "query_pairing_diagnostics",
             Self::QueryStorageStats => "query_storage_stats",
             Self::ClearStorageCache => "clear_storage_cache",
             Self::QueryLocalDevice => "query_local_device",
             Self::QueryPeerConnections => "query_peer_connections",
             Self::RefreshPeerConnections => "refresh_peer_connections",
+            Self::NotifyConnectivityOpportunity => "notify_connectivity_opportunity",
             Self::RecoverNetwork => "recover_network",
             Self::QueryNetworkRecoveryStatus => "query_network_recovery_status",
             Self::QuerySettings => "query_settings",
@@ -171,12 +177,10 @@ impl fmt::Display for OperationKind {
             Self::QueryMemberSyncPreferences => "query_member_sync_preferences",
             Self::UpdateMemberSyncPreferences => "update_member_sync_preferences",
             Self::RemoveMember => "remove_member",
+            Self::QueryDeviceGroupChoices => "query_device_group_choices",
+            Self::ChooseDeviceGroup => "choose_device_group",
             #[cfg(feature = "dev-tools")]
-            Self::DecideMembershipRemoval => "decide_membership_removal",
-            #[cfg(feature = "dev-tools")]
-            Self::QueryWorkspaceConvergence => "query_workspace_convergence",
-            Self::QueryDeviceTrust => "query_device_trust",
-            Self::DecideDeviceTrustChange => "decide_device_trust_change",
+            Self::QueryMembershipDiagnostics => "query_membership_diagnostics",
             Self::QuerySpaceProtection => "query_space_protection",
             Self::SearchEntries => "search_entries",
             Self::QuerySearchTags => "query_search_tags",
@@ -212,34 +216,24 @@ impl fmt::Display for OperationKind {
     }
 }
 
-#[cfg(all(test, feature = "dev-tools"))]
-mod tests {
-    use super::{
-        DecideMembershipRemovalInput, MembershipRemovalDecision, Operation, OperationKind,
-    };
+#[cfg(test)]
+mod device_group_choice_contract_tests {
+    use super::{ChooseDeviceGroupInput, Operation, OperationKind};
 
     #[test]
-    fn workspace_convergence_operation_has_a_stable_kind() {
-        assert_eq!(
-            Operation::QueryWorkspaceConvergence.kind(),
-            OperationKind::QueryWorkspaceConvergence
-        );
-        assert_eq!(
-            Operation::QueryWorkspaceConvergence.kind().to_string(),
-            "query_workspace_convergence"
-        );
-    }
-
-    #[test]
-    fn membership_removal_decision_has_a_stable_operation_kind() {
-        let operation = Operation::DecideMembershipRemoval(DecideMembershipRemovalInput {
-            removal_event_id: "0101010101010101010101010101010101010101010101010101010101010101"
-                .to_owned(),
-            decision: MembershipRemovalDecision::Reject,
+    fn device_group_choice_operations_have_stable_kinds_and_inputs() {
+        let query = Operation::QueryDeviceGroupChoices;
+        let choose = Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+            issue_id: "issue".to_owned(),
+            choice_id: "choice".to_owned(),
+            expected_revision: 7,
+            confirm_local_removal: false,
         });
 
-        assert_eq!(operation.kind(), OperationKind::DecideMembershipRemoval);
-        assert_eq!(operation.kind().to_string(), "decide_membership_removal");
+        assert_eq!(query.kind(), OperationKind::QueryDeviceGroupChoices);
+        assert_eq!(query.kind().to_string(), "query_device_group_choices");
+        assert_eq!(choose.kind(), OperationKind::ChooseDeviceGroup);
+        assert_eq!(choose.kind().to_string(), "choose_device_group");
     }
 }
 
@@ -255,12 +249,14 @@ pub enum Operation {
     ResetSpace,
     FactoryResetSpace,
     QuerySetupState,
-    QueryPairingDiagnostics,
     QueryStorageStats,
     ClearStorageCache,
     QueryLocalDevice,
     QueryPeerConnections,
     RefreshPeerConnections,
+    NotifyConnectivityOpportunity {
+        reason: ConnectivityOpportunity,
+    },
     RecoverNetwork,
     QueryNetworkRecoveryStatus,
     QuerySettings,
@@ -302,12 +298,10 @@ pub enum Operation {
     QueryMemberSyncPreferences(QueryMemberSyncPreferencesInput),
     UpdateMemberSyncPreferences(UpdateMemberSyncPreferencesInput),
     RemoveMember(RemoveMemberInput),
+    QueryDeviceGroupChoices,
+    ChooseDeviceGroup(ChooseDeviceGroupInput),
     #[cfg(feature = "dev-tools")]
-    DecideMembershipRemoval(DecideMembershipRemovalInput),
-    #[cfg(feature = "dev-tools")]
-    QueryWorkspaceConvergence,
-    QueryDeviceTrust,
-    DecideDeviceTrustChange(DecideDeviceTrustChangeInput),
+    QueryMembershipDiagnostics,
     QuerySpaceProtection,
     SearchEntries(SearchEntriesInput),
     QuerySearchTags,
@@ -353,12 +347,14 @@ impl Operation {
             Self::ResetSpace => OperationKind::ResetSpace,
             Self::FactoryResetSpace => OperationKind::FactoryResetSpace,
             Self::QuerySetupState => OperationKind::QuerySetupState,
-            Self::QueryPairingDiagnostics => OperationKind::QueryPairingDiagnostics,
             Self::QueryStorageStats => OperationKind::QueryStorageStats,
             Self::ClearStorageCache => OperationKind::ClearStorageCache,
             Self::QueryLocalDevice => OperationKind::QueryLocalDevice,
             Self::QueryPeerConnections => OperationKind::QueryPeerConnections,
             Self::RefreshPeerConnections => OperationKind::RefreshPeerConnections,
+            Self::NotifyConnectivityOpportunity { .. } => {
+                OperationKind::NotifyConnectivityOpportunity
+            }
             Self::RecoverNetwork => OperationKind::RecoverNetwork,
             Self::QueryNetworkRecoveryStatus => OperationKind::QueryNetworkRecoveryStatus,
             Self::QuerySettings => OperationKind::QuerySettings,
@@ -400,12 +396,10 @@ impl Operation {
             Self::QueryMemberSyncPreferences(_) => OperationKind::QueryMemberSyncPreferences,
             Self::UpdateMemberSyncPreferences(_) => OperationKind::UpdateMemberSyncPreferences,
             Self::RemoveMember(_) => OperationKind::RemoveMember,
+            Self::QueryDeviceGroupChoices => OperationKind::QueryDeviceGroupChoices,
+            Self::ChooseDeviceGroup(_) => OperationKind::ChooseDeviceGroup,
             #[cfg(feature = "dev-tools")]
-            Self::DecideMembershipRemoval(_) => OperationKind::DecideMembershipRemoval,
-            #[cfg(feature = "dev-tools")]
-            Self::QueryWorkspaceConvergence => OperationKind::QueryWorkspaceConvergence,
-            Self::QueryDeviceTrust => OperationKind::QueryDeviceTrust,
-            Self::DecideDeviceTrustChange(_) => OperationKind::DecideDeviceTrustChange,
+            Self::QueryMembershipDiagnostics => OperationKind::QueryMembershipDiagnostics,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
             Self::SearchEntries(_) => OperationKind::SearchEntries,
             Self::QuerySearchTags => OperationKind::QuerySearchTags,
@@ -530,17 +524,13 @@ pub struct RemoveMemberInput {
     pub device_id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MembershipRemovalDecision {
-    Accept,
-    Reject,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecideMembershipRemovalInput {
-    pub removal_event_id: String,
-    pub decision: MembershipRemovalDecision,
+pub struct ChooseDeviceGroupInput {
+    pub issue_id: String,
+    pub choice_id: String,
+    pub expected_revision: u64,
+    pub confirm_local_removal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -548,13 +538,6 @@ pub struct DecideMembershipRemovalInput {
 pub enum DeviceTrustChoiceSummary {
     ApplyChange,
     KeepCurrentDeviceGroup,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DecideDeviceTrustChangeInput {
-    pub change_id: String,
-    pub choice: DeviceTrustChoiceSummary,
-    pub confirm_local_removal: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
