@@ -6,17 +6,21 @@ use napi::Status;
 use napi_derive::napi;
 use uc_engine::{
     CancelJoinSpaceInput, ChooseDeviceGroupInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
-    CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent, EngineState, EventStream,
-    ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation,
-    OperationResult, OperationTerminal, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    ContentTypesPatch, ContentTypesSummary, CreateSpaceInput, Engine, EngineConfig, EngineError,
+    EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
+    InvitationAvailability, JoinSpaceInput, MemberSyncPreferencesPatch,
+    MemberSyncPreferencesSummary, NetworkSettingsPatch, Operation, OperationResult,
+    OperationTerminal, QueryMemberSyncPreferencesInput, RecoverSessionInput, RefreshReason,
+    RelayProbeCredential, RelayProbeInput, RelayProbeOutcome, RemoveMemberInput,
     RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
-    SendTextInput,
+    SendTextInput, SettingsPatch, SettingsUpdateOutcome, UpdateMemberSyncPreferencesInput,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhSendReport,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhMemberSyncPreferences,
+    OhMemberSyncPreferencesPatch, OhNetworkRecoveryStatus, OhNetworkSettings, OhSendReport,
     OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
 };
 
@@ -147,6 +151,67 @@ impl OhEngine {
     }
 
     #[napi]
+    pub async fn query_network_settings(&self) -> napi::Result<OhNetworkSettings> {
+        let result = self
+            .engine
+            .execute(Operation::QuerySettings)
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::Settings(settings) => Ok(network_settings(&settings)),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn update_network_settings(
+        &self,
+        allow_relay_fallback: bool,
+        custom_relay_urls: Vec<String>,
+    ) -> napi::Result<OhNetworkSettings> {
+        let result = self
+            .engine
+            .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
+                network: Some(NetworkSettingsPatch {
+                    allow_relay_fallback: Some(allow_relay_fallback),
+                    custom_relay_urls: Some(custom_relay_urls),
+                    ..NetworkSettingsPatch::default()
+                }),
+                ..SettingsPatch::default()
+            })))
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::SettingsUpdated(SettingsUpdateOutcome::Updated(settings)) => {
+                Ok(network_settings(&settings))
+            }
+            OperationResult::SettingsUpdated(SettingsUpdateOutcome::Rejected { reason }) => {
+                Err(napi::Error::new(Status::InvalidArg, reason))
+            }
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn probe_relay_url(&self, url: String) -> napi::Result<u32> {
+        let result = self
+            .engine
+            .execute(Operation::ProbeRelay(RelayProbeInput {
+                url,
+                credential: RelayProbeCredential::None,
+            }))
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::RelayProbed(RelayProbeOutcome::Success { latency_ms }) => {
+                Ok(latency_ms)
+            }
+            OperationResult::RelayProbed(outcome) => Err(relay_probe_error(outcome)),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
     pub async fn query_local_device(&self) -> napi::Result<OhLocalDevice> {
         let result = self
             .engine
@@ -158,6 +223,50 @@ impl OhEngine {
                 device_id: device.device_id,
                 display_name: device.display_name,
             }),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_member_sync_preferences(
+        &self,
+        device_id: String,
+    ) -> napi::Result<OhMemberSyncPreferences> {
+        let result = self
+            .engine
+            .execute(Operation::QueryMemberSyncPreferences(
+                QueryMemberSyncPreferencesInput { device_id },
+            ))
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::MemberSyncPreferences(preferences) => {
+                Ok(member_sync_preferences(preferences))
+            }
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn update_member_sync_preferences(
+        &self,
+        device_id: String,
+        patch: OhMemberSyncPreferencesPatch,
+    ) -> napi::Result<OhMemberSyncPreferences> {
+        let result = self
+            .engine
+            .execute(Operation::UpdateMemberSyncPreferences(
+                UpdateMemberSyncPreferencesInput {
+                    device_id,
+                    patch: member_sync_preferences_patch(patch),
+                },
+            ))
+            .await
+            .map_err(engine_error)?;
+        match result {
+            OperationResult::MemberSyncPreferences(preferences) => {
+                Ok(member_sync_preferences(preferences))
+            }
             _ => Err(unexpected_result()),
         }
     }
@@ -625,6 +734,73 @@ fn invitation_availability(availability: InvitationAvailability) -> &'static str
     match availability {
         InvitationAvailability::CrossNetwork => "cross_network",
         InvitationAvailability::SameLocalNetwork => "same_local_network",
+    }
+}
+
+fn network_settings(summary: &uc_engine::SettingsSummary) -> crate::OhNetworkSettings {
+    crate::OhNetworkSettings {
+        allow_relay_fallback: summary.network.allow_relay_fallback,
+        custom_relay_urls: summary.network.custom_relay_urls.clone(),
+    }
+}
+
+fn relay_probe_error(outcome: RelayProbeOutcome) -> napi::Error {
+    let message = match outcome {
+        RelayProbeOutcome::InvalidUrl { message }
+        | RelayProbeOutcome::Dns { message }
+        | RelayProbeOutcome::Tls { message }
+        | RelayProbeOutcome::Handshake { message }
+        | RelayProbeOutcome::Other { message } => message,
+        RelayProbeOutcome::Timeout => "relay probe timed out".to_owned(),
+        RelayProbeOutcome::Success { .. } => "unexpected successful relay probe".to_owned(),
+    };
+    napi::Error::new(
+        Status::GenericFailure,
+        format!("relay probe failed: {message}"),
+    )
+}
+
+fn member_sync_preferences(
+    summary: MemberSyncPreferencesSummary,
+) -> crate::OhMemberSyncPreferences {
+    crate::OhMemberSyncPreferences {
+        send_enabled: summary.send_enabled,
+        receive_enabled: summary.receive_enabled,
+        send_content_types: content_types(summary.send_content_types),
+        receive_content_types: content_types(summary.receive_content_types),
+    }
+}
+
+fn content_types(summary: ContentTypesSummary) -> crate::OhContentTypes {
+    crate::OhContentTypes {
+        text: summary.text,
+        image: summary.image,
+        link: summary.link,
+        file: summary.file,
+        code_snippet: summary.code_snippet,
+        rich_text: summary.rich_text,
+    }
+}
+
+fn member_sync_preferences_patch(
+    patch: crate::OhMemberSyncPreferencesPatch,
+) -> MemberSyncPreferencesPatch {
+    MemberSyncPreferencesPatch {
+        send_enabled: patch.send_enabled,
+        receive_enabled: patch.receive_enabled,
+        send_content_types: patch.send_content_types.map(content_types_patch),
+        receive_content_types: patch.receive_content_types.map(content_types_patch),
+    }
+}
+
+fn content_types_patch(patch: crate::OhContentTypesPatch) -> ContentTypesPatch {
+    ContentTypesPatch {
+        text: patch.text,
+        image: patch.image,
+        link: patch.link,
+        file: patch.file,
+        code_snippet: patch.code_snippet,
+        rich_text: patch.rich_text,
     }
 }
 
