@@ -27,7 +27,9 @@ use crate::clipboard::inbound::{ClipboardInboundEventPort, InboundClipboardApply
 use crate::clipboard::local::{
     LocalClipboardOutcome, LocalClipboardProcessError, LocalClipboardRequest,
 };
-use crate::deps::{ApplicationDeps, CurrentSpaceMemberScopePort};
+use crate::deps::{
+    ApplicationDeps, ApplyEncryptionPassphraseChangePort, CurrentSpaceMemberScopePort,
+};
 use crate::device::query_local_device::QueryLocalDeviceUseCase;
 use crate::facade::app_facade::{AppFacade, AppFacadeParts};
 use crate::facade::blob_transfer::BlobTransferFacade;
@@ -37,11 +39,9 @@ use crate::facade::clipboard_history::{HistoryMaintenanceRuntime, HistoryMainten
 use crate::facade::clipboard_write::RestoreBroadcastTrigger;
 use crate::search::{SearchAssembly, SearchShutdownError};
 use crate::settings::SettingsAssembly;
-use crate::space::SpaceAdmissionObservationRegistry;
-use crate::space::SpaceFacade;
 use crate::space::{
-    SpaceAdmissionDeps, SpaceFacadeDeps, SpaceRuntimeAdapters, SpaceSessionDeps,
-    SpaceTransitionDeps,
+    KnownPeerContact, SpaceAdmissionDeps, SpaceAdmissionObservationRegistry, SpaceFacade,
+    SpaceFacadeDeps, SpaceRuntimeAdapters, SpaceSessionDeps, SpaceTransitionDeps,
 };
 use crate::transfer::blob::facade::BlobTransferDeps;
 use crate::transfer::file::assembly::FileTransferAssembly;
@@ -53,11 +53,12 @@ pub struct ApplicationSpaceAdapters {
         futures::stream::BoxStream<'static, Result<crate::space::ConnectionHint, anyhow::Error>>,
     pub current_engine_version: String,
     pub admission_credentials: Arc<dyn crate::deps::PrepareSpaceAdmissionCredentialsPort>,
+    pub encryption_passphrase_change: Arc<dyn ApplyEncryptionPassphraseChangePort>,
     pub local_identity: Arc<dyn LocalIdentityPort>,
     pub pairing_invitation: Arc<dyn PairingInvitationPort>,
     pub pairing_invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
     pub pairing_invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,
-    pub presence: Arc<dyn PeerReachabilityPort>,
+    pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub analytics: Arc<dyn uc_observability_contract::analytics::AnalyticsFacade>,
     pub connection_channel: Option<Arc<dyn ConnectionChannelPort>>,
     pub device_management_reset_data: Arc<dyn crate::deps::DeviceManagementResetDataPort>,
@@ -66,6 +67,7 @@ pub struct ApplicationSpaceAdapters {
     pub runtime: SpaceRuntimeAdapters,
     pub peer_reachability_changed_events:
         tokio::sync::broadcast::Receiver<uc_core::ports::PeerReachabilityChanged>,
+    pub known_peer_contacts: tokio::sync::broadcast::Receiver<KnownPeerContact>,
 }
 
 /// Engine 在共享 Iroh node 上选择完成的 Clipboard adapter。
@@ -229,6 +231,7 @@ pub struct ApplicationAssembly {
     file_transfer: Arc<FileTransferAssembly>,
     clipboard: Arc<ClipboardAssembly>,
     admission_observations: Arc<SpaceAdmissionObservationRegistry>,
+    space_transition_changes: tokio::sync::watch::Sender<()>,
 }
 
 impl ApplicationAssembly {
@@ -259,11 +262,16 @@ impl ApplicationAssembly {
             file_transfer,
             clipboard,
             admission_observations: Arc::new(SpaceAdmissionObservationRegistry::default()),
+            space_transition_changes: tokio::sync::watch::channel(()).0,
         }
     }
 
     pub fn host_event_bus(&self) -> Arc<crate::facade::HostEventBus> {
         Arc::clone(&self.deps.host_event_bus)
+    }
+
+    pub fn subscribe_space_transition_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.space_transition_changes.subscribe()
     }
 
     pub fn host_adapters(&self) -> ApplicationHostAdapters {
@@ -346,11 +354,12 @@ impl ApplicationAssembly {
             connection_hints,
             current_engine_version,
             admission_credentials,
+            encryption_passphrase_change,
             local_identity,
             pairing_invitation,
             pairing_invitation_addresses,
             pairing_invitation_by_address,
-            presence,
+            peer_reachability,
             analytics,
             connection_channel,
             device_management_reset_data,
@@ -358,6 +367,7 @@ impl ApplicationAssembly {
             space_security_reset,
             runtime,
             peer_reachability_changed_events,
+            known_peer_contacts,
         } = space;
         let re_pairing_state_store = Arc::clone(&runtime.admission.re_pairing_state_store);
         let space = Arc::new(SpaceFacade::new_dormant(SpaceFacadeDeps {
@@ -373,6 +383,7 @@ impl ApplicationAssembly {
                 current_space_identity: Arc::clone(&self.deps.current_space_identity),
                 initial_space_activation: Arc::clone(&self.deps.initial_space_activation),
                 admission_credentials,
+                encryption_passphrase_change,
             },
             admission: SpaceAdmissionDeps {
                 local_identity: Arc::clone(&local_identity),
@@ -383,7 +394,7 @@ impl ApplicationAssembly {
                 pairing_invitation,
                 pairing_invitation_addresses,
                 pairing_invitation_by_address,
-                presence: Arc::clone(&presence),
+                peer_reachability: Arc::clone(&peer_reachability),
                 analytics,
                 connection_channel,
             },
@@ -396,7 +407,9 @@ impl ApplicationAssembly {
             },
             runtime_adapters: runtime,
             peer_reachability_changed_events,
+            known_peer_contacts,
             admission_observations: Arc::clone(&self.admission_observations),
+            space_transition_changes: self.space_transition_changes.clone(),
         }));
         let member_scope = space.current_member_scope();
         let ApplicationClipboardAdapters {
@@ -545,7 +558,7 @@ impl ApplicationAssembly {
             blob_transfer: Arc::clone(&blob_transfer),
             receiver: clipboard_receiver,
             member_scope,
-            presence: peer_reachability,
+            peer_reachability: peer_reachability,
             known_peers: peer_addresses,
             deliveries: Arc::clone(&self.deps.entry_delivery_repo),
             trusted_peers: Arc::clone(&self.deps.trusted_peer_repo),

@@ -21,6 +21,8 @@ const REPOSITORY_ROOT = realpathSync(resolve(SCRIPT_DIR, '../..'))
 
 const EXPECTED_PACKAGES = [
   'openmls-validation',
+  'uc-connectivity-host',
+  'uc-connectivity-relay',
   'uc-application',
   'uc-content-hash',
   'uc-core',
@@ -49,7 +51,7 @@ const INTERNAL_PACKAGES = new Set([
 ])
 
 const BINDING_PACKAGES = ['uc-engine-uniffi', 'uc-ohos-napi']
-const P2P_CONSUMERS = [...BINDING_PACKAGES, 'uc-mobile-probe-core']
+const P2P_CONSUMERS = [...BINDING_PACKAGES, 'uc-mobile-probe-core', 'uc-connectivity-host']
 const DESKTOP_OWNED_PACKAGES = new Set([
   'uc-app-paths',
   'uc-bootstrap',
@@ -318,7 +320,7 @@ function checkPublicSurface(metadata, sources) {
       continue
     }
     for (const dependency of normalDependencies(packageMetadata)) {
-      if (packageMetadata.name === 'uc-mobile-probe-core' && INTERNAL_PACKAGES.has(dependency.name)) {
+      if (['uc-mobile-probe-core', 'uc-connectivity-host'].includes(packageMetadata.name) && INTERNAL_PACKAGES.has(dependency.name)) {
         addProblem(
           problems,
           'public surface',
@@ -609,7 +611,7 @@ function checkMembershipConfirmationWatermarkOwnership(sources) {
   const positiveAssignment = /\.confirmed_position\s*=\s*(?!None\b)[A-Za-z_]/g
   const applicationAssignments = sources.application.match(positiveAssignment) ?? []
   const authenticatedExchangeOwners = [
-    read('crates/uc-application/src/space/membership/synchronize_history/target_use_case.rs'),
+    read('crates/uc-application/src/space/membership/synchronize_history/use_case.rs'),
     read('crates/uc-application/src/space/membership/handle_history_message/use_case.rs'),
   ].join('\n')
   const ownerAssignments = authenticatedExchangeOwners.match(positiveAssignment) ?? []
@@ -1887,7 +1889,7 @@ function repositorySources() {
       'membership_attestation_adapter.rs',
       'membership_branch_recovery_adapter.rs',
       'membership_history_exchange_adapter.rs',
-      'presence_adapter.rs',
+      'peer_reachability_adapter.rs',
       'transfer_progress_adapter.rs',
       'active_clipboard/dispatch_adapter.rs',
       'active_clipboard/pull_client_adapter.rs',

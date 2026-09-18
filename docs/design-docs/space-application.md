@@ -50,7 +50,7 @@ flowchart LR
         SpaceFacade --> Life[生命周期 cases]
         SpaceFacade --> Admission[准入 cases]
         SpaceFacade --> Trust[成员信任 cases]
-        SpaceFacade --> Roster[内部 MemberRosterFacade]
+        SpaceFacade --> RosterFacade[内部 MemberRosterFacade]
     end
 
     subgraph Membership[成员 application]
@@ -60,6 +60,7 @@ flowchart LR
         SpaceApp --> AdmissionRx[准入接收 endpoint]
         SpaceApp --> Runtime[SpaceMembershipMaintenanceRuntime]
         Runtime --> Maintain[MaintainSpaceMembershipUseCase]
+        RosterFacade --> Roster[QueryMemberRosterUseCase]
         Trust --> Ledger[MembershipLedger]
         HistoryTx --> Ledger
         HistoryRx --> Ledger
@@ -130,6 +131,7 @@ activity，持有唯一暂停、恢复和失败补偿顺序。Search 与 receive
 | `lifecycle/recover_space_session/` | `use_case.rs`, `model.rs`, `error.rs` | 从已保存钥匙恢复会话和后台活动 |
 | `lifecycle/query_space_access_state/` | `use_case.rs`, `model.rs`, `error.rs` | 查询是否已有 Space、会话是否 ready |
 | `lifecycle/query_space_setup_state/` | `use_case.rs`, `model.rs`, `error.rs` | 查询 setup UI 所需的 Space、邀请、设备名和 re-pairing 状态 |
+| `lifecycle/change_encryption_passphrase/` | `use_case.rs`, `ports.rs`, `error.rs` | 设备列表只显示有效本机时修改为用户自定义口令；不要求重新配对状态 |
 | `lifecycle/rebuild_space/` | `use_case.rs`, `transition.rs`, `membership_rebuilder.rs`, `ports.rs` | 可恢复地重建单设备 Space |
 | `lifecycle/reset_space/` | `use_case.rs`, `ports.rs`, `error.rs` | 用户重置和重置提交状态查询 |
 | `lifecycle/upgrade_space/` | `use_case.rs`, `error.rs` | 跨版本里程碑触发必要重建并记录版本 |
@@ -160,7 +162,7 @@ activity，持有唯一暂停、恢复和失败补偿顺序。Search 与 receive
 | `membership/decide_device_trust_change/` | `use_case.rs`, `model.rs`, `error.rs` | 接受或拒绝远端移除变化 |
 | `membership/handle_history_message/` | `use_case.rs`, `model.rs`, `error.rs` | 入站成员历史分页和 ACK |
 | `membership/recover_conflict/` | `use_case.rs`, `issuer.rs`, `ports.rs`, `tests.rs` | 两阶段恢复握手、恢复包验证与七阶段 generation transition 的唯一编排 |
-| `membership/synchronize_history/` | `target_use_case.rs`, `model.rs`, `error.rs` | 出站成员历史同步 |
+| `membership/synchronize_history/` | `use_case.rs`, `model.rs`, `error.rs` | 出站成员历史同步 |
 | `membership/maintenance/` | `use_case.rs`, `runtime.rs`, `ports.rs`, `model.rs` | 固定恢复顺序与唯一后台生命周期 |
 
 ### 支撑模块
@@ -172,7 +174,8 @@ activity，持有唯一暂停、恢复和失败补偿顺序。Search 与 receive
 | `lifecycle/session/` | 组合成员、搜索、接收的 pause/resume；失败恢复 | 不执行 lock/unlock 本身 |
 | `membership/re_pairing/` | 重新配对提示状态 | 不代表当前成员集合 |
 | `connectivity/recovery/mod.rs` | 重建网络 session、共享请求、退避和网络变化窗口 | 不读写成员资格，不代替成员 runtime |
-| `facade/roster/`（相邻目录） | 用最终 scope 过滤成员资料，再叠加在线状态和偏好 | 不授予成员资格；不是第二个公开 Space facade |
+| `space/membership/query_member_roster.rs` | 用最终 scope 过滤成员资料并叠加在线状态 | 不授予成员资格；不处理名单之外的成员操作 |
+| `facade/roster/`（相邻目录） | 对外转发名单查询，并提供稳定展示类型和状态订阅 | 不聚合仓储、成员范围或逐成员在线状态 |
 
 ## 调用关系
 
@@ -250,8 +253,8 @@ flowchart TD
 #### `UnlockSpaceUseCase`
 
 - **入口**：`Passphrase -> SpaceId`，facade 包装成 `UnlockSpaceResult`。
-- **职责/作用**：读取当前 Space、解锁密钥材料、执行版本升级和数据 readiness。
-- **关系**：`PostSessionReadiness` 调 `UpgradeSpaceUseCase`、移动内容回填和成员资料读取；facade 随后恢复 session activity 并唤醒维护。
+- **职责/作用**：读取当前 Space、解锁密钥材料、执行版本升级和数据 readiness；成员资料在本次解锁返回前必须已经可读。
+- **关系**：`PostSessionReadiness` 调 `UpgradeSpaceUseCase`、移动内容回填，并立即请求和等待一轮成员维护后读取成员资料；facade 随后只恢复其余 session activity，不再重复唤醒维护。
 - **重点关注**：错误要区分未初始化、密码错误、密钥损坏和内部失败；不创建或猜测 Space。
 
 #### `LockSpaceSessionUseCase`
@@ -264,8 +267,8 @@ flowchart TD
 #### `RecoverSpaceSessionUseCase`
 
 - **入口**：无输入，返回 `RecoverSpaceSessionResult { unlocked, resumed }`。
-- **职责/作用**：尝试用已保存钥匙恢复已有 Space session；成功后完成 readiness 并恢复活动。
-- **关系**：facade 在 `resumed = true` 时唤醒成员维护。
+- **职责/作用**：尝试用已保存钥匙恢复已有 Space session；成功后完成 readiness 并恢复活动。readiness 会等待本次必要的成员维护完成，因此正常启动不依赖周期任务。
+- **关系**：解锁与自动恢复共用 `PostSessionReadiness`；成员维护运行期负责串行当前轮与本次立即轮，facade 不再另行唤醒同一工作。
 - **重点关注**：无当前 Space 或无可恢复 session 是明确的未恢复结果，不等于错误；密钥损坏和 keyring miss 必须保留稳定分类。
 
 #### `QuerySpaceAccessStateUseCase`
@@ -281,6 +284,13 @@ flowchart TD
 - **职责/作用**：提供 setup 页面需要的当前 Space、最早到期邀请、设备名和 re-pairing 状态。
 - **关系**：读取 current Space、邀请 holder、settings 和 `RePairingState`。
 - **重点关注**：不修复状态、不拨号；邀请只是内存临时状态，重启丢失是设计行为。
+
+#### `ChangeEncryptionPassphraseUseCase`
+
+- **入口**：一次提交用户自定义的新口令及再次输入值。
+- **职责/作用**：先确认两次输入一致，再使用与公开设备列表相同的当前成员范围确认只存在有效本机；撤销全部现有邀请后调用单一口令替换能力。
+- **关系**：与邀请签发共享串行边界；Infra 保存受保护恢复记录并在重启时前向完成。
+- **重点关注**：不读取或要求 re-pairing 提示；可用或暂停的其他成员任一存在都拒绝；不生成口令；不清除既有 re-pairing 提示，不遍历或重加密历史内容。
 
 #### `RebuildSpaceUseCase`
 
@@ -336,9 +346,9 @@ flowchart TD
 #### `CancelPairingInvitationUseCase`
 
 - **入口**：无输入，返回 `()` 或 `NotIssued`。
-- **职责/作用**：清空所有进程内待用邀请。
+- **职责/作用**：逐项撤销实际发行方中的全部待用邀请，再清空进程内 holder；发行方已不存在或已过期视为撤销完成。
 - **关系**：操作 `InMemoryPairingInvitationHolder`；reset 也复用 holder 的清理 port。
-- **重点关注**：不通知 rendezvous、不修改持久成员状态；竞态加入会在准入 endpoint 中因 invitation miss 被拒绝。
+- **重点关注**：发行方暂时不可用时保留本机 holder 供重试，不修改持久成员状态；成功撤销后竞态加入会在准入 endpoint 中因 invitation miss 被拒绝。
 
 #### `SpaceAdmissionProtocol`
 
@@ -520,9 +530,12 @@ flowchart TD
 
 - invitation、admission id、传输身份、generation 和前驱证据必须绑定。
 - 用户 Join 才能新建 aggregate；recovery 只扫描并推进已保存状态。
-- Commit 后不回滚；Cancel 只在提交边界前生效。
+- 一次配对从用户发起起共用五分钟，认证、重试、重连和重启都不能续期。
+- 正式 Add 不回滚；任何阶段都允许先保存本机终止。已知 Add 用精确 Remove 结束，远端决定未知时保留放弃证明和后续核实责任，不要求先恢复成功或等待对端在线。
+- 邀请方已经应用成员但缺少对方确认时，到期只从“等待确认”转为“未确认”，不自动移除；合法迟到确认仍可完成，用户移除或终止围栏优先。
 - 状态推进由 Core aggregate 生成；Application 不得逐字段拼装协议终态。
 - 准入状态只写独立加密仓库，不得重新放入 membership ledger。
+- 维护流程先完成本机到期和隔离，再做网络恢复；结束后释放大型准备材料，保留最小防重放与撤销证据。
 
 ### 修改 runtime
 

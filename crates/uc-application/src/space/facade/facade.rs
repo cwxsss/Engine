@@ -2,6 +2,9 @@
 //! trust, roster, reset, and session actions. Network adapters receive the two
 //! authenticated endpoints exposed here; all workflow state remains private.
 
+use crate::facade::roster::PeerReachabilityRefreshReport;
+use crate::space::PeerConnectionError;
+
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -28,6 +31,10 @@ use crate::space::lifecycle::{
     build_space_session_activity, combine_space_session_activity, DeferredSpaceSessionActivity,
 };
 use crate::space::lifecycle::{
+    ChangeEncryptionPassphraseError, ChangeEncryptionPassphraseUseCase,
+    RetirePairingInvitationsPort,
+};
+use crate::space::lifecycle::{
     InitializeSpaceError, InitializeSpaceRequest, InitializeSpaceResult, InitializeSpaceUseCase,
 };
 use crate::space::lifecycle::{LockSpaceSessionError, LockSpaceSessionUseCase};
@@ -45,7 +52,10 @@ use crate::space::lifecycle::{
 use crate::space::lifecycle::{
     RecoverSpaceSessionError, RecoverSpaceSessionResult, RecoverSpaceSessionUseCase,
 };
-use crate::space::membership::RePairingState;
+use crate::space::membership::{
+    MembershipReadiness, QueryMembershipReadinessError, QueryMembershipReadinessUseCase,
+    RePairingState,
+};
 use crate::transfer::receive::reconciliation::EnsureReceiveReadyPort;
 use uc_core::ids::DeviceId;
 
@@ -66,7 +76,9 @@ pub struct SpaceFacade {
     membership_maintenance: Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort>,
     lock_space_session: Arc<LockSpaceSessionUseCase>,
     recover_space_session: Arc<RecoverSpaceSessionUseCase>,
+    change_encryption_passphrase: Arc<ChangeEncryptionPassphraseUseCase>,
     query_space_access_state: Arc<QuerySpaceAccessStateUseCase>,
+    query_membership_readiness: Arc<QueryMembershipReadinessUseCase>,
     query_space_setup_state: Arc<QuerySpaceSetupStateUseCase>,
     current_member_scope: Arc<dyn crate::space::membership::CurrentSpaceMemberScopePort>,
     member_roster: MemberRosterFacade,
@@ -77,6 +89,7 @@ pub struct SpaceFacade {
         Arc<dyn uc_core::membership::MembershipHistoryExchangeEndpointPort>,
     membership_branch_recovery_endpoint: Arc<dyn crate::deps::IssueMembershipBranchRecoveryPort>,
     space_admission_endpoint: Arc<dyn crate::deps::HandleAuthenticatedSpaceAdmissionMessagePort>,
+    pairing_configuration: Mutex<()>,
     application: Mutex<Option<SpaceApplication>>,
 }
 
@@ -91,7 +104,9 @@ impl SpaceFacade {
             transition,
             runtime_adapters,
             peer_reachability_changed_events,
+            known_peer_contacts,
             admission_observations,
+            space_transition_changes,
         } = deps;
         let SpaceTransitionDeps {
             device_management_reset_data,
@@ -106,9 +121,11 @@ impl SpaceFacade {
             &app_deps,
             runtime_adapters,
             peer_reachability_changed_events,
+            known_peer_contacts,
             Arc::clone(&re_pairing_state)
                 as Arc<dyn crate::space::membership::ResolveRePairingPort>,
             admission_observations,
+            space_transition_changes,
         );
         let membership_initializer = application.initialize_membership();
         let membership_admission = application.query_membership_admission();
@@ -120,6 +137,7 @@ impl SpaceFacade {
         let space_admission_endpoint = application.space_admission_endpoint();
         let membership_session_activity = application.membership_session_activity();
         let membership_maintenance = application.membership_maintenance_wake();
+        let query_membership_readiness = application.query_membership_readiness();
         let application_activity = Arc::new(DeferredSpaceSessionActivity::new());
         let SpaceSessionDeps {
             space_access,
@@ -129,9 +147,10 @@ impl SpaceFacade {
             current_space_identity,
             initial_space_activation,
             admission_credentials,
+            encryption_passphrase_change,
         } = session;
         let activity = combine_space_session_activity(
-            membership_session_activity,
+            Arc::clone(&membership_session_activity),
             Arc::clone(&application_activity)
                 as Arc<dyn crate::space::lifecycle::SpaceSessionActivityPort>,
         );
@@ -144,19 +163,19 @@ impl SpaceFacade {
             pairing_invitation,
             pairing_invitation_addresses,
             pairing_invitation_by_address,
-            presence,
+            peer_reachability,
             analytics,
             connection_channel,
         } = admission;
         let connections = crate::space::connectivity::PeerConnectionCoordinator::new(
             Arc::clone(&peer_scope),
-            Arc::clone(&presence),
+            Arc::clone(&peer_reachability),
             connection_hints,
         );
         let member_roster = MemberRosterFacade::new(MemberRosterDeps {
             member_repo: Arc::clone(&member_repo),
             local_identity: Arc::clone(&local_identity),
-            presence: Arc::clone(&presence),
+            peer_reachability: Arc::clone(&peer_reachability),
             connection_channel,
             peer_scope: Arc::clone(&peer_scope),
         })
@@ -182,6 +201,11 @@ impl SpaceFacade {
         let cancel_pairing_invitation = Arc::new(CancelPairingInvitationUseCase::new(
             Arc::clone(&invitation_holder_for_facade),
             Arc::clone(&pairing_invitation),
+        ));
+        let change_encryption_passphrase = Arc::new(ChangeEncryptionPassphraseUseCase::new(
+            Arc::clone(&peer_scope),
+            Arc::clone(&cancel_pairing_invitation) as Arc<dyn RetirePairingInvitationsPort>,
+            encryption_passphrase_change,
         ));
         let rebuild_transition = Arc::new(SpaceRebuildTransition::new(
             device_management_reset_data,
@@ -254,6 +278,7 @@ impl SpaceFacade {
         let session_readiness = Arc::new(PostSessionReadiness::new(
             Arc::clone(&upgrade_space),
             Arc::clone(&mobile_consumable_backfill),
+            membership_session_activity,
             Arc::clone(&member_repo),
         ));
         let unlock_space = Arc::new(UnlockSpaceUseCase::new(
@@ -292,7 +317,9 @@ impl SpaceFacade {
             membership_maintenance,
             lock_space_session,
             recover_space_session,
+            change_encryption_passphrase,
             query_space_access_state,
+            query_membership_readiness,
             query_space_setup_state,
             current_member_scope: peer_scope,
             member_roster,
@@ -302,6 +329,7 @@ impl SpaceFacade {
             membership_history_endpoint,
             membership_branch_recovery_endpoint,
             space_admission_endpoint,
+            pairing_configuration: Mutex::new(()),
             application: Mutex::new(Some(application)),
         }
     }
@@ -369,11 +397,7 @@ impl SpaceFacade {
     pub async fn recover_space_session(
         &self,
     ) -> Result<RecoverSpaceSessionResult, RecoverSpaceSessionError> {
-        let result = self.recover_space_session.execute().await?;
-        if result.resumed {
-            self.membership_maintenance.wake();
-        }
-        Ok(result)
+        self.recover_space_session.execute().await
     }
 
     pub async fn query_space_access_state(
@@ -382,8 +406,14 @@ impl SpaceFacade {
         self.query_space_access_state.execute().await
     }
 
+    pub async fn query_membership_readiness(
+        &self,
+    ) -> Result<MembershipReadiness, QueryMembershipReadinessError> {
+        self.query_membership_readiness.execute().await
+    }
+
     /// A1 · Create the encrypted space on a fresh device. On success the
-    /// presence cache is primed (F1).
+    /// peer_reachability cache is primed (F1).
     #[instrument(skip_all)]
     pub async fn initialize_space(
         &self,
@@ -404,7 +434,7 @@ impl SpaceFacade {
     }
 
     /// A2 · Unlock the encrypted space after a restart. On success the
-    /// presence cache is primed (F1).
+    /// peer_reachability cache is primed (F1).
     #[instrument(skip_all)]
     pub async fn unlock_space(
         &self,
@@ -415,7 +445,6 @@ impl SpaceFacade {
             .resume_after_session_ready()
             .await
             .map_err(|error| UnlockSpaceError::internal(anyhow::anyhow!(error)))?;
-        self.membership_maintenance.wake();
         Ok(UnlockSpaceResult { space_id })
     }
 
@@ -429,6 +458,11 @@ impl SpaceFacade {
     pub async fn issue_pairing_invitation(
         &self,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
+        let _guard = self.pairing_configuration.lock().await;
+        self.change_encryption_passphrase
+            .ensure_ready()
+            .await
+            .map_err(IssuePairingInvitationError::passphrase_change_recovery)?;
         self.issue_pairing_invitation.execute().await
     }
 
@@ -438,6 +472,11 @@ impl SpaceFacade {
         &self,
         selected_ip: IpAddr,
     ) -> Result<IssuePairingInvitationResult, IssuePairingInvitationError> {
+        let _guard = self.pairing_configuration.lock().await;
+        self.change_encryption_passphrase
+            .ensure_ready()
+            .await
+            .map_err(IssuePairingInvitationError::passphrase_change_recovery)?;
         self.issue_pairing_invitation_for_address
             .execute(selected_ip)
             .await
@@ -456,6 +495,7 @@ impl SpaceFacade {
     pub async fn join_space(
         &self,
         input: JoinSpaceInput,
+        started_at_ms: i64,
     ) -> Result<JoinSpaceResult, JoinSpaceError> {
         let space_admission = self
             .application
@@ -464,7 +504,7 @@ impl SpaceFacade {
             .as_ref()
             .map(SpaceApplication::space_admission)
             .ok_or(JoinSpaceError::Unavailable)?;
-        space_admission.start_join(input).await
+        space_admission.start_join_at(input, started_at_ms).await
     }
 
     pub async fn query_device_trust(
@@ -644,7 +684,20 @@ impl SpaceFacade {
     /// cannot leave a displayed short code redeemable.
     #[instrument(skip_all)]
     pub async fn cancel_invitation(&self) -> Result<(), CancelInvitationError> {
+        let _guard = self.pairing_configuration.lock().await;
         self.cancel_pairing_invitation.execute().await
+    }
+
+    /// 单设备用户提交并确认自定义口令后，撤销旧邀请并启用新口令。
+    pub async fn change_encryption_passphrase(
+        &self,
+        passphrase: &uc_core::crypto::domain::Passphrase,
+        passphrase_confirmation: &uc_core::crypto::domain::Passphrase,
+    ) -> Result<(), ChangeEncryptionPassphraseError> {
+        let _guard = self.pairing_configuration.lock().await;
+        self.change_encryption_passphrase
+            .execute(passphrase, passphrase_confirmation)
+            .await
     }
 
     /// Rebuild this profile as a single-device space while retaining local
@@ -689,17 +742,16 @@ impl SpaceFacade {
         self.connections.notify_opportunity(reason)
     }
 
-    pub async fn refresh_presence(
+    pub async fn refresh_peer_reachability(
         &self,
-    ) -> Result<crate::facade::roster::PresenceRefreshReport, crate::space::PeerConnectionError>
-    {
+    ) -> Result<PeerReachabilityRefreshReport, PeerConnectionError> {
         self.connections.refresh().await
     }
 
     pub async fn list_roster_entries(
         &self,
     ) -> Result<Vec<crate::facade::roster::RosterEntry>, crate::facade::roster::RosterError> {
-        self.member_roster.list_with_presence().await
+        self.member_roster.list_with_peer_reachability().await
     }
 
     pub async fn member_sync_preferences(
@@ -735,10 +787,10 @@ impl SpaceFacade {
         self.member_roster.list_peer_snapshots().await
     }
 
-    pub fn subscribe_presence_events(
+    pub fn subscribe_peer_reachability_events(
         &self,
     ) -> tokio::sync::broadcast::Receiver<uc_core::ports::PeerReachabilityChanged> {
-        self.member_roster.subscribe_presence_events()
+        self.member_roster.subscribe_peer_reachability_events()
     }
 
     /// F2 · Tear down facade-owned background work cleanly on app exit.

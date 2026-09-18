@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{error, warn};
-use uc_application::deps::{ProfileFactoryResetCapabilityError, StopProfileRuntimePort};
+use uc_application::deps::{
+    ProfileFactoryResetCapabilityError, ProfileUpgradeBackupPort, StopProfileRuntimePort,
+};
 use uc_application::facade::{
     AppFacade, ApplicationRuntime, NetworkRecoveryEvent, ProfileFactoryResetFacade,
     ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
@@ -29,7 +31,10 @@ use crate::assembly::host::{
 #[cfg(feature = "lan-compat")]
 use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
 use crate::engine::event_stream::EventSender;
-use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities, HostFileAccess};
+use crate::{
+    EngineConfig, EngineError, EngineErrorCategory, EngineEvent, HostCapabilities, HostFileAccess,
+    RefreshReason,
+};
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
 use session_supervisor::SessionSupervisor;
 const START_FAILED_CODE: u32 = 1101;
@@ -49,6 +54,7 @@ pub(crate) struct ProductionRuntime {
     temporary_dir: std::path::PathBuf,
     clipboard_import_root: std::path::PathBuf,
     files: Arc<dyn HostFileAccess>,
+    profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort>,
     clipboard_change_runtime: HostClipboardChangeRuntime,
     events: EventSender,
     #[cfg(feature = "dev-tools")]
@@ -172,6 +178,7 @@ impl ProductionRuntime {
             temporary_dir,
             clipboard_import_root,
             files,
+            profile_upgrade_backups,
             clipboard_changes,
         } = wire_host_capabilities_with_emitter(&config, host, emitter, progress.clone())
             .await
@@ -235,6 +242,7 @@ impl ProductionRuntime {
         session_supervisor.resume().await?;
         spawn_space_transition_watcher(
             Arc::clone(&session_supervisor),
+            wired.application.subscribe_space_transition_changes(),
             &task_registry,
             events.clone(),
         )
@@ -276,6 +284,7 @@ impl ProductionRuntime {
             temporary_dir,
             clipboard_import_root,
             files,
+            profile_upgrade_backups,
             clipboard_change_runtime,
             events,
             #[cfg(feature = "dev-tools")]
@@ -301,29 +310,55 @@ impl ProductionRuntime {
 
 async fn spawn_space_transition_watcher(
     supervisor: Arc<SessionSupervisor>,
+    mut changes: tokio::sync::watch::Receiver<()>,
     tasks: &Arc<TaskRegistry>,
     events: EventSender,
 ) {
     let _ = tasks
         .spawn(move |cancel| async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(100));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut check_required = true;
             loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    _ = interval.tick() => match supervisor.transition_pending_session().await {
-                        Ok(Some(revision)) => {
-                            events.send(crate::EngineEvent::DeviceTrustChanged { revision });
-                            events.send(crate::EngineEvent::RefreshRequired {
-                                reason: crate::RefreshReason::StateInvalidated,
-                            });
+                if !check_required {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        changed = changes.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            check_required = true;
                         }
-                        Ok(None) => {}
-                        Err(error) => warn!(
+                    }
+                    continue;
+                }
+                check_required = false;
+                match supervisor.transition_pending_session().await {
+                    Ok(Some(revision)) => {
+                        events.send(EngineEvent::DeviceTrustChanged { revision });
+                        events.send(EngineEvent::RefreshRequired {
+                            reason: RefreshReason::StateInvalidated,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(
                             error_code = error.code(),
                             retryable = error.is_retryable(),
                             "runtime Space transition attempt failed"
-                        ),
+                        );
+                        if error.is_retryable() {
+                            tokio::select! {
+                                _ = cancel.cancelled() => return,
+                                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                                    check_required = true;
+                                }
+                                changed = changes.changed() => {
+                                    if changed.is_err() {
+                                        return;
+                                    }
+                                    check_required = true;
+                                }
+                            }
+                        }
                     }
                 }
             }

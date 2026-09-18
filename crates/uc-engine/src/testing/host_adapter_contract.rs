@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+
+mod profile_upgrade_backup;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -366,6 +368,9 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         },
         crate::JoinSpaceStatusSummary::Rejected { reason, .. } => {
             panic!("join was rejected: {reason:?}")
+        }
+        crate::JoinSpaceStatusSummary::Terminated { reason, .. } => {
+            panic!("join was terminated locally: {reason:?}")
         }
     };
     // ADR-017: join success is expressed by the saved workspace state. Both
@@ -982,6 +987,45 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
         crate::OperationResult::EntrySent(report) => report.entry_id,
         other => panic!("expected sent entry, got {other:?}"),
     };
+    let first_new_passphrase = "first user selected passphrase";
+    assert_eq!(
+        engine
+            .execute(crate::Operation::ChangeEncryptionPassphrase(
+                crate::ChangeEncryptionPassphraseInput {
+                    passphrase: crate::SecretString::new(first_new_passphrase),
+                    passphrase_confirmation: crate::SecretString::new(first_new_passphrase),
+                },
+            ))
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionPassphraseChanged
+    );
+    assert_eq!(
+        engine
+            .execute(crate::Operation::LockEncryption)
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionLocked
+    );
+    assert_eq!(
+        engine
+            .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+                passphrase: crate::SecretString::new("correct horse"),
+            }))
+            .await
+            .unwrap_err()
+            .category(),
+        crate::EngineErrorCategory::Unauthorized
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+                passphrase: crate::SecretString::new(first_new_passphrase),
+            }))
+            .await
+            .unwrap(),
+        crate::OperationResult::SpaceUnlocked { .. }
+    ));
     engine
         .execute(crate::Operation::IssueInvitation)
         .await
@@ -1051,6 +1095,79 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
             .await
             .unwrap(),
         crate::OperationResult::InvitationIssued { .. }
+    ));
+    let new_passphrase = "second user selected passphrase";
+    let mismatch = engine
+        .execute(crate::Operation::ChangeEncryptionPassphrase(
+            crate::ChangeEncryptionPassphraseInput {
+                passphrase: crate::SecretString::new(new_passphrase),
+                passphrase_confirmation: crate::SecretString::new("different passphrase"),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        mismatch.code(),
+        crate::error_codes::ENCRYPTION_PASSPHRASE_MISMATCH_CODE
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::QuerySetupState)
+            .await
+            .unwrap(),
+        crate::OperationResult::SetupState(crate::SetupStateSummary {
+            current_invitation: Some(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        engine
+            .execute(crate::Operation::ChangeEncryptionPassphrase(
+                crate::ChangeEncryptionPassphraseInput {
+                    passphrase: crate::SecretString::new(new_passphrase),
+                    passphrase_confirmation: crate::SecretString::new(new_passphrase),
+                },
+            ))
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionPassphraseChanged
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::QuerySetupState)
+            .await
+            .unwrap(),
+        crate::OperationResult::SetupState(crate::SetupStateSummary {
+            re_pairing_required: true,
+            current_invitation: None,
+            ..
+        })
+    ));
+    assert_eq!(
+        engine
+            .execute(crate::Operation::LockEncryption)
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionLocked
+    );
+    let old_passphrase = engine
+        .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+            passphrase: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        old_passphrase.category(),
+        crate::EngineErrorCategory::Unauthorized
+    );
+    assert!(matches!(
+        engine
+            .execute(crate::Operation::UnlockSpace(crate::UnlockSpaceInput {
+                passphrase: crate::SecretString::new(new_passphrase),
+            }))
+            .await
+            .unwrap(),
+        crate::OperationResult::SpaceUnlocked { .. }
     ));
     assert!(!temp
         .path()

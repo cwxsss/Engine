@@ -2,9 +2,19 @@
 
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
+- [会话恢复后的成员资料立即就绪](2026-09-18-session-membership-readiness-recovery.md)（本机正式版冷启动中，会话恢复约 0.12 秒完成，成员列表约 0.66 秒可读）
+
+- [Space 可用性启动门槛](2026-09-17-space-readiness-startup-gate.md)（本机正式版启动与设备名单验收完成；多设备全离线的独立进程场景未构造）
+
+- [配对到期、本机终止与新意图替换](2026-09-13-admission-expiry-and-replacement.md)（S0–S8 完成；真实设备、跨真实外网和产品前台验收跳过）
+
+- [已有连接活性与故障恢复](2026-09-12-connection-liveness-and-recovery.md)（实现与本地三轮完整验收完成；远程 CI、发布和产品采用未执行）
+
 - [已配对设备自动连接与恢复](2026-09-11-automatic-peer-connections.md)（实现与 Mac/iOS 模拟器验收完成；其他实体平台跳过）
 
 - [040 以完整业务动作组织观测记录](040-business-observability-records.md)（本机验证完成，产品宿主与真实后端未验收）
+
+- [043 单设备修改加密口令](043-single-device-passphrase-change.md)（Engine 与移动绑定完成；实体设备和产品界面验收跳过）
 
 - [015 离线优先成员移除](015-offline-first-member-removal.md)（部分由 ADR-020 取代）
 - [016 工作空间全局收敛](016-workspace-wide-convergence.md)（部分由 ADR-020 取代）

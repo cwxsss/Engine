@@ -29,12 +29,15 @@ pub enum OperationKind {
     CancelJoinSpace,
     UnlockSpace,
     RecoverSession,
+    ChangeEncryptionPassphrase,
     IssueInvitation,
     CancelInvitation,
     ResetSpace,
     FactoryResetSpace,
     QuerySetupState,
     QueryStorageStats,
+    ListUpgradeBackups,
+    DeleteUpgradeBackup,
     ClearStorageCache,
     QueryLocalDevice,
     QueryPeerConnections,
@@ -75,6 +78,7 @@ pub enum OperationKind {
     AbortMobileFileUpload,
     QueryReceiveReadiness,
     QueryEncryptionState,
+    QueryMembershipReadiness,
     LockEncryption,
     VerifySecureStorageAccess,
     ListDevices,
@@ -125,12 +129,15 @@ impl fmt::Display for OperationKind {
             Self::CancelJoinSpace => "cancel_join_space",
             Self::UnlockSpace => "unlock_space",
             Self::RecoverSession => "recover_session",
+            Self::ChangeEncryptionPassphrase => "change_encryption_passphrase",
             Self::IssueInvitation => "issue_invitation",
             Self::CancelInvitation => "cancel_invitation",
             Self::ResetSpace => "reset_space",
             Self::FactoryResetSpace => "factory_reset_space",
             Self::QuerySetupState => "query_setup_state",
             Self::QueryStorageStats => "query_storage_stats",
+            Self::ListUpgradeBackups => "list_upgrade_backups",
+            Self::DeleteUpgradeBackup => "delete_upgrade_backup",
             Self::ClearStorageCache => "clear_storage_cache",
             Self::QueryLocalDevice => "query_local_device",
             Self::QueryPeerConnections => "query_peer_connections",
@@ -171,6 +178,7 @@ impl fmt::Display for OperationKind {
             Self::AbortMobileFileUpload => "abort_mobile_file_upload",
             Self::QueryReceiveReadiness => "query_receive_readiness",
             Self::QueryEncryptionState => "query_encryption_state",
+            Self::QueryMembershipReadiness => "query_membership_readiness",
             Self::LockEncryption => "lock_encryption",
             Self::VerifySecureStorageAccess => "verify_secure_storage_access",
             Self::ListDevices => "list_devices",
@@ -237,6 +245,25 @@ mod device_group_choice_contract_tests {
     }
 }
 
+#[cfg(test)]
+mod encryption_passphrase_contract_tests {
+    use super::{ChangeEncryptionPassphraseInput, Operation, OperationKind};
+    use crate::SecretString;
+
+    #[test]
+    fn passphrase_change_operation_has_stable_kind_and_redacts_input() {
+        let operation = Operation::ChangeEncryptionPassphrase(ChangeEncryptionPassphraseInput {
+            passphrase: SecretString::new("DO-NOT-LOG-THIS"),
+            passphrase_confirmation: SecretString::new("DO-NOT-LOG-EITHER"),
+        });
+
+        assert_eq!(operation.kind(), OperationKind::ChangeEncryptionPassphrase);
+        assert_eq!(operation.kind().to_string(), "change_encryption_passphrase");
+        assert!(!format!("{operation:?}").contains("DO-NOT-LOG-THIS"));
+        assert!(!format!("{operation:?}").contains("DO-NOT-LOG-EITHER"));
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum Operation {
     CreateSpace(CreateSpaceInput),
@@ -244,12 +271,15 @@ pub enum Operation {
     CancelJoinSpace(CancelJoinSpaceInput),
     UnlockSpace(UnlockSpaceInput),
     RecoverSession(RecoverSessionInput),
+    ChangeEncryptionPassphrase(ChangeEncryptionPassphraseInput),
     IssueInvitation,
     CancelInvitation,
     ResetSpace,
     FactoryResetSpace,
     QuerySetupState,
     QueryStorageStats,
+    ListUpgradeBackups,
+    DeleteUpgradeBackup(DeleteUpgradeBackupInput),
     ClearStorageCache,
     QueryLocalDevice,
     QueryPeerConnections,
@@ -292,6 +322,7 @@ pub enum Operation {
     AbortMobileFileUpload(AbortMobileFileUploadInput),
     QueryReceiveReadiness,
     QueryEncryptionState,
+    QueryMembershipReadiness,
     LockEncryption,
     VerifySecureStorageAccess,
     ListDevices,
@@ -342,12 +373,15 @@ impl Operation {
             Self::CancelJoinSpace(_) => OperationKind::CancelJoinSpace,
             Self::UnlockSpace(_) => OperationKind::UnlockSpace,
             Self::RecoverSession(_) => OperationKind::RecoverSession,
+            Self::ChangeEncryptionPassphrase(_) => OperationKind::ChangeEncryptionPassphrase,
             Self::IssueInvitation => OperationKind::IssueInvitation,
             Self::CancelInvitation => OperationKind::CancelInvitation,
             Self::ResetSpace => OperationKind::ResetSpace,
             Self::FactoryResetSpace => OperationKind::FactoryResetSpace,
             Self::QuerySetupState => OperationKind::QuerySetupState,
             Self::QueryStorageStats => OperationKind::QueryStorageStats,
+            Self::ListUpgradeBackups => OperationKind::ListUpgradeBackups,
+            Self::DeleteUpgradeBackup(_) => OperationKind::DeleteUpgradeBackup,
             Self::ClearStorageCache => OperationKind::ClearStorageCache,
             Self::QueryLocalDevice => OperationKind::QueryLocalDevice,
             Self::QueryPeerConnections => OperationKind::QueryPeerConnections,
@@ -390,6 +424,7 @@ impl Operation {
             Self::AbortMobileFileUpload(_) => OperationKind::AbortMobileFileUpload,
             Self::QueryReceiveReadiness => OperationKind::QueryReceiveReadiness,
             Self::QueryEncryptionState => OperationKind::QueryEncryptionState,
+            Self::QueryMembershipReadiness => OperationKind::QueryMembershipReadiness,
             Self::LockEncryption => OperationKind::LockEncryption,
             Self::VerifySecureStorageAccess => OperationKind::VerifySecureStorageAccess,
             Self::ListDevices => OperationKind::ListDevices,
@@ -492,6 +527,22 @@ impl fmt::Debug for JoinSpaceInput {
 #[derive(Clone, PartialEq, Eq)]
 pub struct UnlockSpaceInput {
     pub passphrase: SecretString,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChangeEncryptionPassphraseInput {
+    pub passphrase: SecretString,
+    pub passphrase_confirmation: SecretString,
+}
+
+impl fmt::Debug for ChangeEncryptionPassphraseInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChangeEncryptionPassphraseInput")
+            .field("passphrase", &"[REDACTED]")
+            .field("passphrase_confirmation", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl fmt::Debug for UnlockSpaceInput {
@@ -823,4 +874,9 @@ pub enum ResendEntryOutcome {
 pub enum EntryNotResendableReason {
     RemoteOrigin,
     PayloadLost,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteUpgradeBackupInput {
+    pub id: String,
 }

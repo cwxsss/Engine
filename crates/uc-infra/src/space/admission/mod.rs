@@ -1,5 +1,6 @@
 mod credentials;
 mod digest;
+mod display;
 mod full_invitation;
 mod joiner;
 mod recovery;
@@ -8,7 +9,6 @@ mod repository;
 mod security;
 mod sponsor;
 
-#[cfg(test)]
 pub(crate) use credentials::prepare_registration;
 pub(crate) use credentials::{
     install_prepared_registration_for_control_generation,
@@ -25,6 +25,8 @@ pub use joiner::{
     DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
     DefaultJoinerStartMaterial,
 };
+#[cfg(feature = "test-util")]
+pub use repository::AdmissionRepositoryBenchmark;
 pub use repository::SqliteSpaceAdmissionState;
 pub use security::AdmissionSecurityTransitionAdapter;
 pub use sponsor::{

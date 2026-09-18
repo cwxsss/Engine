@@ -32,6 +32,19 @@ pub enum NetworkRecoveryPhaseSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipReadinessStateSummary {
+    Ready,
+    Locked,
+    Recovering,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipReadinessSummary {
+    pub state: MembershipReadinessStateSummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkRecoveryStatusSummary {
     pub phase: NetworkRecoveryPhaseSummary,
     pub retryable: bool,
@@ -405,6 +418,18 @@ pub enum JoinSpaceStatusSummary {
         join_id: String,
         reason: JoinSpaceRejectionReasonSummary,
     },
+    Terminated {
+        join_id: String,
+        reason: JoinSpaceTerminationReasonSummary,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinSpaceTerminationReasonSummary {
+    Cancelled,
+    Expired,
+    Superseded,
 }
 
 impl fmt::Debug for InvitationAvailability {
@@ -431,6 +456,7 @@ pub enum OperationResult {
         unlocked: bool,
         resumed: bool,
     },
+    EncryptionPassphraseChanged,
     InvitationIssued {
         invitation_code: String,
         full_invitation: String,
@@ -442,6 +468,10 @@ pub enum OperationResult {
     SpaceFactoryReset,
     SetupState(SetupStateSummary),
     StorageStats(StorageStatsSummary),
+    UpgradeBackups(Vec<UpgradeBackupSummary>),
+    UpgradeBackupDeleted {
+        id: String,
+    },
     StorageCacheCleared {
         freed_bytes: u64,
     },
@@ -493,6 +523,7 @@ pub enum OperationResult {
     },
     ReceiveReadiness(ReceiveReadinessSummary),
     EncryptionState(EncryptionStateSummary),
+    MembershipReadiness(MembershipReadinessSummary),
     EncryptionLocked,
     SecureStorageAccess {
         granted: bool,
@@ -635,6 +666,9 @@ impl fmt::Debug for OperationResult {
                 .field("kind", &"session_recovered")
                 .field("unlocked", unlocked)
                 .field("resumed", resumed),
+            Self::EncryptionPassphraseChanged => {
+                debug.field("kind", &"encryption_passphrase_changed")
+            }
             Self::InvitationIssued { .. } => debug.field("kind", &"invitation_issued"),
             Self::InvitationCancelled => debug.field("kind", &"invitation_cancelled"),
             Self::SpaceReset => debug.field("kind", &"space_reset"),
@@ -643,6 +677,10 @@ impl fmt::Debug for OperationResult {
             Self::StorageStats(stats) => {
                 debug.field("kind", &"storage_stats").field("stats", stats)
             }
+            Self::UpgradeBackups(backups) => debug
+                .field("kind", &"upgrade_backups")
+                .field("count", &backups.len()),
+            Self::UpgradeBackupDeleted { .. } => debug.field("kind", &"upgrade_backup_deleted"),
             Self::StorageCacheCleared { freed_bytes } => debug
                 .field("kind", &"storage_cache_cleared")
                 .field("freed_bytes", freed_bytes),
@@ -758,6 +796,9 @@ impl fmt::Debug for OperationResult {
             Self::EncryptionState(state) => debug
                 .field("kind", &"encryption_state")
                 .field("state", state),
+            Self::MembershipReadiness(readiness) => debug
+                .field("kind", &"membership_readiness")
+                .field("readiness", readiness),
             Self::EncryptionLocked => debug.field("kind", &"encryption_locked"),
             Self::SecureStorageAccess { granted } => debug
                 .field("kind", &"secure_storage_access")
@@ -907,6 +948,17 @@ impl fmt::Debug for SetupStateSummary {
             .field("re_pairing_required", &self.re_pairing_required)
             .finish()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeBackupSummary {
+    pub id: String,
+    pub created_at_ms: u64,
+    pub source_product: Option<String>,
+    pub source_engine: Option<String>,
+    pub target_product: String,
+    pub target_engine: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1100,8 +1152,18 @@ pub struct DeviceTrustRelationshipSummary {
     pub group_relationship: DeviceGroupRelationshipSummary,
     pub compatibility: DeviceCompatibilitySummary,
     pub sync_relationship: DeviceSyncRelationshipSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_confirmation: Option<PairingConfirmationSummary>,
     pub available_actions: Vec<DeviceTrustActionSummary>,
     pub blocked_reason: Option<DeviceTrustUnavailableReasonSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingConfirmationSummary {
+    AwaitingPeerConfirmation,
+    Unconfirmed,
+    Confirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

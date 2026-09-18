@@ -57,6 +57,11 @@ struct PassivePorts {
     join_commits: AtomicUsize,
 }
 
+#[async_trait]
+impl RefreshVerifiedPeerAddressPort for PassivePorts {
+    async fn refresh_verified_peer_address(&self, _peer: &uc_core::ids::DeviceId) {}
+}
+
 impl HistoricalMembershipSignatureVerifier for PassivePorts {
     fn verify(
         &self,
@@ -118,8 +123,20 @@ impl GroupRevocationPort for PassivePorts {
     ) -> Result<Vec<GroupRevocationResult>, KeyEpochError> {
         Ok(Vec::new())
     }
-    async fn pending_space_group_updates(&self) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
+    async fn due_space_group_updates(
+        &self,
+        _: i64,
+        _: Option<DeviceId>,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
         Ok(Vec::new())
+    }
+
+    async fn record_space_group_update_failures(
+        &self,
+        _: &[(String, GroupUpdateDispatchError)],
+        _: i64,
+    ) -> Result<usize, KeyEpochError> {
+        Ok(0)
     }
     async fn acknowledge_space_group_update(&self, _: &str, _: i64) -> Result<bool, KeyEpochError> {
         Ok(false)
@@ -375,8 +392,9 @@ impl PendingAdmissionRecoveryStatePort for PassivePorts {
     async fn load(
         &self,
         _trigger: AdmissionRecoveryTrigger,
-    ) -> Result<Vec<LoadedPendingAdmission>, PendingAdmissionRecoveryStateError> {
-        Ok(Vec::new())
+        _now_ms: i64,
+    ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> {
+        Ok(LoadedAdmissionRecovery::default())
     }
 
     async fn commit(
@@ -393,6 +411,7 @@ impl SpaceAdmissionTransportPort for PassivePorts {
     async fn establish_initial(
         &self,
         _admission_id: SpaceAdmissionId,
+        _attempt_timeline: AdmissionAttemptTimeline,
         _route: &SpaceAdmissionRoute,
         _encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
@@ -533,6 +552,14 @@ impl ExecuteJoinerActivationPort for PassivePorts {
     ) -> Result<CompletedJoinerActivation, ExecuteJoinerActivationError> {
         unreachable!()
     }
+
+    async fn terminate(
+        &self,
+        _admission_id: SpaceAdmissionId,
+        _saved_transition: &[u8],
+    ) -> Result<(), ExecuteJoinerActivationError> {
+        unreachable!()
+    }
 }
 
 #[async_trait]
@@ -573,6 +600,13 @@ impl AdmissionSpaceTransitionPort for PassivePorts {
     }
 
     async fn discard_pre_activation(
+        &self,
+        _transition: &AdmissionSpaceTransitionV2,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        unreachable!()
+    }
+
+    async fn terminate_admission(
         &self,
         _transition: &AdmissionSpaceTransitionV2,
     ) -> Result<(), AdmissionSpaceTransitionError> {
@@ -771,7 +805,8 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
         LoadedMembershipLedger::no_current_space(),
     )));
     let passive = Arc::new(PassivePorts::default());
-    let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
+    let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
+    let (_known_peer_contact_tx, known_peer_contact_rx) = tokio::sync::broadcast::channel(4);
     let mut application = SpaceApplication::build_for_test(
         SpaceRuntimeAdapters {
             admission: SpaceAdmissionAdapters {
@@ -806,6 +841,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
                 membership_announcement: passive.clone(),
                 device_trust_observations: passive.clone(),
                 membership_history_transport: passive.clone(),
+                verified_peer_address_refresh: passive.clone(),
                 membership_branch_recovery_channel: passive.clone(),
                 membership_branch_recovery_recipient: passive.clone(),
                 membership_branch_transition: passive.clone(),
@@ -826,7 +862,8 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
         passive.clone(),
         passive.clone(),
         Arc::new(crate::facade::HostEventBus::new()),
-        presence_rx,
+        peer_reachability_rx,
+        known_peer_contact_rx,
         passive.clone(),
     );
 
@@ -836,12 +873,15 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
 
     let joined = application
         .space_admission()
-        .start_join(JoinSpaceInput {
-            invitation_code: uc_core::pairing::InvitationCode::new("join-code"),
-            device_name: Some("New Device".to_owned()),
-            passphrase: uc_core::crypto::domain::Passphrase::new("passphrase"),
-            preserve_unreadable_history: false,
-        })
+        .start_join_at(
+            JoinSpaceInput {
+                invitation_code: uc_core::pairing::InvitationCode::new("join-code"),
+                device_name: Some("New Device".to_owned()),
+                passphrase: uc_core::crypto::domain::Passphrase::new("passphrase"),
+                preserve_unreadable_history: false,
+            },
+            1_800_000_000_000,
+        )
         .await
         .expect("new protocol JoinSpace should return after saving Pending");
     assert!(matches!(joined.status, CurrentJoinStatus::Pending { .. }));

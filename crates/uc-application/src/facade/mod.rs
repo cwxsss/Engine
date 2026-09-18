@@ -40,20 +40,23 @@ pub use crate::space::{
     DecideDeviceTrustChangeResult, DeviceGroupChoiceImpact, DeviceTrustChangeChoice,
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, JoinSpaceError,
-    JoinSpaceInput, JoinSpaceResult, JoinedSpace, LockSpaceSessionError, MembershipCommitReceipt,
-    MembershipConflictStatus, MembershipDiagnosticsView, NetworkRecoveryEvent,
-    NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
-    NetworkRecoveryStatus, PendingDeviceTrustChange, PendingInboundMember, QueryDeviceTrustError,
-    QueryMembershipDiagnosticsError, QuerySpaceAccessStateError, RebuildNetworkSessionError,
-    RebuildNetworkSessionPort, RecoverSpaceSessionError, RecoverSpaceSessionResult,
-    RemoveSpaceMemberError, RemoveSpaceMemberResult, SpaceAccessState,
+    JoinSpaceInput, JoinSpaceResult, JoinSpaceTerminationReason, JoinedSpace,
+    LockSpaceSessionError, MembershipCommitReceipt, MembershipConflictStatus,
+    MembershipDiagnosticsView, MembershipReadiness, NetworkRecoveryEvent, NetworkRecoveryFacade,
+    NetworkRecoveryPhase, NetworkRecoveryRequestError, NetworkRecoveryStatus,
+    PairingConfirmationStatus, PendingDeviceTrustChange, PendingInboundMember,
+    QueryDeviceTrustError, QueryMembershipDiagnosticsError, QueryMembershipReadinessError,
+    QuerySpaceAccessStateError, RebuildNetworkSessionError, RebuildNetworkSessionPort,
+    RecoverSpaceSessionError, RecoverSpaceSessionResult, RemoveSpaceMemberError,
+    RemoveSpaceMemberResult, SpaceAccessState,
 };
 
 pub use crate::clipboard::active::{ActiveClipboardFacade, ActiveClipboardReconcileOutcome};
 pub use app_facade::{
-    AppFacade, AppPresenceEvent, AppPresenceSubscription, AppPresenceSubscriptionError,
-    ChooseDeviceGroup, ChooseDeviceGroupError, ChooseDeviceGroupResult, ClipboardRestoreMode,
-    DeviceGroupChoice, DeviceGroupChoicesView, DeviceGroupIssue, QueryDeviceGroupChoicesError,
+    AppFacade, AppPeerReachabilityEvent, AppPeerReachabilitySubscription,
+    AppPeerReachabilitySubscriptionError, ChooseDeviceGroup, ChooseDeviceGroupError,
+    ChooseDeviceGroupResult, ClipboardRestoreMode, DeviceGroupChoice, DeviceGroupChoicesView,
+    DeviceGroupIssue, QueryDeviceGroupChoicesError,
 };
 pub use app_paths::AppPaths;
 pub use blob_transfer::{
@@ -130,8 +133,8 @@ pub use crate::clipboard::resource::{
 pub use roster::{
     connection_channel_to_wire, ConnectionChannel, ContentTypesPatch, ContentTypesView,
     MemberProtectionStatusView, MemberProtectionView, MemberSummary, MemberSyncPreferencesPatch,
-    MemberSyncPreferencesView, PeerReachabilityChanged, PeerSnapshotView, PresenceRefreshReport,
-    RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
+    MemberSyncPreferencesView, PeerReachabilityChanged, PeerReachabilityRefreshReport,
+    PeerSnapshotView, RosterEntry, RosterError, SpaceProtectionModeView, SpaceProtectionView,
 };
 pub use search::{
     map_search_error, SearchFacade, SearchFacadeError, SearchPageView, SearchProjectionBuilder,
@@ -154,14 +157,15 @@ pub use settings::{
 };
 
 pub use space_setup::{
-    CancelInvitationError, CompletePendingSpaceTransitionError, CurrentInvitation,
-    InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
-    IssuePairingInvitationResult, MembershipConflictBranchView, MembershipConflictView,
-    MembershipConflictsView, PairingInvitationAddressCandidate, QueryMembershipConflictsError,
-    QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError, QuerySetupStateError,
-    RedeemPairingInvitationError, ResetSpaceError, ResolveMembershipConflictError,
-    ResolveMembershipConflictInput, ResolveMembershipConflictResult, SetupStateView,
-    SpaceActivityError, SpaceFacade, UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
+    CancelInvitationError, ChangeEncryptionPassphraseError, CompletePendingSpaceTransitionError,
+    CurrentInvitation, InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult,
+    IssuePairingInvitationError, IssuePairingInvitationResult, MembershipConflictBranchView,
+    MembershipConflictView, MembershipConflictsView, PairingInvitationAddressCandidate,
+    QueryMembershipConflictsError, QueryPairingInvitationAddressesError,
+    QueryPendingSpaceTransitionError, QuerySetupStateError, RedeemPairingInvitationError,
+    ResetSpaceError, ResolveMembershipConflictError, ResolveMembershipConflictInput,
+    ResolveMembershipConflictResult, SetupStateView, SpaceActivityError, SpaceFacade,
+    UnlockSpaceError, UnlockSpaceInput, UnlockSpaceResult,
 };
 pub use storage::{ClearCacheResultView, StorageFacade, StorageFacadeError, StorageStatsView};
 pub use upgrade::{AcknowledgeUpgradeError, DetectUpgradeError, UpgradeFacade, UpgradeStatus};

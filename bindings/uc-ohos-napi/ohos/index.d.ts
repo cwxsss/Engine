@@ -166,7 +166,7 @@ export interface OhJoinedSpace {
 }
 
 export interface OhJoinSpaceStatus {
-  status: 'active' | 'pending' | 'rejected'
+  status: 'active' | 'pending' | 'rejected' | 'terminated'
   joinId: string
   joinedSpace?: OhJoinedSpace
   targetSpaceId?: string
@@ -175,6 +175,7 @@ export interface OhJoinSpaceStatus {
   cancelRequested?: boolean
   peerUpgradeRequired: boolean
   rejectionReason?: string
+  terminationReason?: 'cancelled' | 'expired' | 'superseded'
 }
 
 export interface OhMembershipConvergence {
@@ -271,6 +272,7 @@ export interface OhEngine {
   queryDeviceGroupChoices(): Promise<string>
   queryMembershipConvergence(): Promise<OhMembershipConvergence>
   issueInvitation(): Promise<OhInvitationIssued>
+  changeEncryptionPassphrase(passphrase: string, passphraseConfirmation: string): Promise<void>
   joinSpace(
     invitationCode: string,
     deviceName: string | null,

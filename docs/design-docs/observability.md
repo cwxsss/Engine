@@ -206,7 +206,7 @@ TraceId 伪造。产品 analytics 不携带两者。
 ## 跨设备传播
 
 完整成员同步由 Application 的 SynchronizeMembershipHistoryUseCase 持有不透明恢复作用域，固定入口为
-membership.recover.{startup|resume|peer_online|retry|state_changed|requested}。现有维护触发者提供原因，不向 Engine 暴露目标身份或内部步骤。
+membership.recover.{startup|resume|peer_online|peer_contact|retry|state_changed|requested}。现有维护触发者提供原因，不向 Engine 暴露目标身份或内部步骤。
 已完成、部分完成、等待、失败与损坏分别按现有完整报告分类；只有已经记录的分歧证据/关系才标为 conflict，不把普通传输失败猜成冲突。
 没有目标和实际工作时不导出该业务节点，也不生成指向被省略节点的日志。该作用域只覆盖本次在线执行，不跨重启持有。
 
@@ -218,6 +218,12 @@ Pending 为 partial，Busy 为 deferred。UpToDate 只产生无关联的 skipped
 `error_kind`，以及存在时的 `target_activated`、`io_error_kind`、`io_error_code`。只从错误来源提取系统错误类型和数字码，
 不输出错误正文或路径。该事件使用 Infra 本地 target，不属于 `uc.telemetry`，不进入远程 schema v1；
 Engine 仍只记录完整升级结果，不读取或暴露内部阶段。
+
+升级前备份沿用同一隐私边界，在 Infra 本地日志记录固定的 `backup_action`、`error_kind`，以及存在时的
+`io_error_kind`、`io_error_code`。记录由公共合同的 `uc.local_diagnostic` 本地目标发出，共同运行时仅接受
+合同调用点和固定字段，将其写入可导出的 Engine 日志；宿主日志与远程处理器都忽略该目标。它不输出错误正文、
+文件名、路径或安全存储条目名称，也不新增业务 trace、port 字段或 Engine 公开错误内容；启动页面继续只使用
+稳定失败分类。
 
 成员历史交换在协议边界用固定名称区分请求用途：`membership.{compare_summary|request_history|send_history|request_conflict_evidence|send_conflict_evidence|acknowledge|deliver_restricted_event|deliver_restricted_decision}.{exchange|handle_and_reply}`。
 Engine 原样装饰既有完整能力，不解析消息。Infra 只根据已有协议消息提供用途；`exchange` 成功表示发起方收到并解码回复，
@@ -262,6 +268,49 @@ Space 的 OPAQUE 认证握手保持原布局；认证后的 Request/Reply 使用
 业务处理、reply 和确认共用一个总截止时间，缺少确认、错误确认或超时都只记录一次明确失败。认证前没有可信父关系：失败只写一条
 带真实耗时、无 TraceId/SpanId 的完成日志，不制造伪造的远端父关系；认证成功后才建立三层子树。每个三层节点和最终生命周期 root
 各自恰好对应一条完成日志，日志只通过 TraceId/SpanId 关联，不复制 flow。
+
+认证通信内部的等待由 Infra 完整交换负责人通过 `pairing.exchange.step.started/finished` 记录到本地，
+不新增业务 span，也不把步骤交给 Engine。Joiner 记录准备请求、发送请求、接收回复、校验回复、发送确认、
+结束发送和等待对端结束；Sponsor 记录处理请求、准备回复、发送回复、接收确认和结束发送。
+处理请求的本地步骤用于定位等待，原 Engine endpoint 子节点仍负责完整业务处理结果。
+每一步只记录固定步骤、角色、开始/结束时间、实际耗时与结果；以已有 TraceId/SpanId 定位同一轮，
+不复制消息编号、身份或凭据，不为步骤新建关联号。开始记录发生后才执行对应动作；只有实际完成才记录成功。
+发送完成只表示本机写入完成，对端收到由对端接收记录证明；不通过两个设备的墙钟差推算单向网络延迟。
+
+通信负责人在原错误归类之前保留具体原因：超时、连接关闭、读写失败、格式错误、认证拒绝和版本不兼容。
+具体原因同时决定该轮 trace 与完成日志的错误摘要，本地完成记录额外携带失败步骤；保持原有业务返回、
+关闭码、确认、超时和恢复语义。总截止时间到达时结算当前步骤为超时，Future 被丢弃时为中断并结算一次取消，
+进程强制终止不伪造结束。普通模式保留所有步骤，详细模式不改变其结果或可见性。
+
+`pairing.exchange.network.snapshot` 只在详细模式落盘，在连接建立后、交换开始及正常返回或失败返回时各取一次，
+不增加后台采样任务。只保留当前选中路径的固定类型、可用时的往返延迟微秒数，以及连接累计丢包和收发数据报数量。
+丢包计数包含此前路径，不视为本步骤新增丢包；路径或延迟不可取得时明确标为 unknown/unavailable，
+当前库不提供独立重传次数，固定记录 unsupported，不用数据报数差推测重传。
+这些快照不能单独证明首次连接慢的原因，须结合现有连接开始、候选来源、尝试、建立结果及双方完整时间窗排查。
+
+配对内部处理通过普通模式的 `runtime.work.started/finished` 记录固定工作名称、实际耗时及结果。
+Infra 在既有状态读取、提交、邀请解析、材料准备和激活实现中记录本地工作；仓库读取与保存只在
+已观测的操作内展开，保存后的重读属于保存耗时，嵌套时间不能重复相加。这里不记录安全存储调用
+内容、错误正文或业务标识，也不据此猜测数据库、钥匙串或密码计算的根因。
+
+Application 只在本地执行锁、回复后处理以及维护负责人内部提供诊断作用域，固定分类由封闭合同
+编码；不创建业务 span，不把内部阶段传给 Engine。跨层完整能力的计时与结果仍由既有 Engine
+decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固定类型；Joiner 将原有在线配对关联
+延续到回复后的验证、提交、激活和唤醒。消息对应的 `protocol_round` 固定为协议的第 1 至 4 轮，
+不是网络重试次数；取消不伪造轮次。尚未建立生命周期的初始化工作保留本进程时间，不伪造跨端关联。
+
+维护请求通过内部队列信封携带不透明父上下文及仅本进程有效的 `maintenance_round`。该编号不来源于
+业务身份、不持久化、不参与调度。`membership.maintenance.*` 区分请求、排队、开始、合并、未执行与
+完成；`queue_wait_ms` 从请求到实际开始，包含消息队列及已有轮次的等待，执行锁另计。合并记录指向
+实际保留的轮次，暂停、通道关闭及中断不能记录成成功。每一步带同一轮次、触发原因和实际结果，
+更新记录保留待更新数及本轮选取数，单次投递仅表示发送结果，持久确认仍由原负责人完成。
+新的轮次编号只连接本机运行诊断，不延长已完成的配对计时，也不改变离线后建立新 trace 的规则。
+
+会话负责人记录停止旧任务、停止 Application、停止网络、准备新会话、启动和恢复的本地耗时；
+等待旧操作正常结束与请求取消后的等待分别记录。已有返回未包含更具体失败时只表达调用已返回，
+不能扩张成对所有内部任务健康的保证。Future 被丢弃统一记中断，返回错误不被误报为中断。
+`session.lock.waited` 只在确认需要切换或检查失败后记录实际锁等待；日常空检查不逐条输出，
+该记录只有测量完成时的事件，不伪造开始事件。
 
 ## 输出与隐私
 
@@ -345,7 +394,8 @@ UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队�
 跨日时按最旧优先清理；单条记录会使总量超限时整条丢弃。目录不可写时降级到其余输出，不影响业务。文件名解析只有诊断合同一份
 事实来源；诊断导出先有界刷新当前文件队列，再识别该严格命名。
 
-Resource 中 namespace、service name 和 schema version 固定；environment、OS 与 app channel 使用固定枚举。`service.version` 只接受
+Resource 中 namespace、service name 和 schema version 固定；environment、OS 与 app channel 使用固定枚举。app channel 只接受
+development、test、alpha、beta、rc、stable、production；`service.version` 只接受
 SemVer，预发布标记只允许 alpha、beta、rc，并可选再加一段数字；build metadata 不发送；`host.arch` 由运行时从固定架构集合取得，不接受宿主输入。
 绑定配置的 Debug 输出整体隐藏。
 

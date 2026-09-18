@@ -1,10 +1,14 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use tempfile::tempdir;
 use uc_application::deps::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
+    CurrentSpaceIdentityPort, JoinerActivationIntent, JoinerActivationStateError,
+    ValidateJoinerActivationIntentPort,
 };
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{DeviceId, SpaceId};
@@ -29,15 +33,49 @@ use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use crate::security::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
-    AdmissionKeyManager, DefaultCurrentProfile, MasterKey, ProfileContentKeyVault,
-    ProfileRuntimeLayout, SpaceControlGeneration, SpaceTransitionActivation,
+    ActiveSpaceGenerationManifestStoreError, AdmissionKeyManager, DefaultCurrentProfile, MasterKey,
+    ProfileContentKeyVault, ProfileRuntimeLayout, SpaceControlGeneration,
+    SpaceControlGenerationError, SpaceTransitionActivation, SpaceTransitionActivationError,
 };
 use crate::space::{
-    prepare_registration, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
+    prepare_registration, CurrentSpaceResolver, InMemorySession, KeyMaterialStore,
+    RuntimeSpaceAccessAdapter,
 };
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);
+
+struct AllowActivationIntent;
+
+struct ToggleActivationIntent(AtomicBool);
+
+#[async_trait]
+impl ValidateJoinerActivationIntentPort for AllowActivationIntent {
+    async fn validate(
+        &self,
+        _intent: JoinerActivationIntent,
+    ) -> Result<bool, JoinerActivationStateError> {
+        Ok(true)
+    }
+}
+
+#[async_trait]
+impl ValidateJoinerActivationIntentPort for ToggleActivationIntent {
+    async fn validate(
+        &self,
+        _intent: JoinerActivationIntent,
+    ) -> Result<bool, JoinerActivationStateError> {
+        Ok(self.0.load(Ordering::SeqCst))
+    }
+}
+
+fn activation_intent(transition: &AdmissionSpaceTransitionV2) -> JoinerActivationIntent {
+    JoinerActivationIntent::from_saved_plan(
+        transition.attempt_id(),
+        &transition.encode().expect("transition encodes"),
+    )
+    .expect("activation intent")
+}
 
 impl SecureStoragePort for MemorySecureStorage {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
@@ -143,11 +181,13 @@ async fn v3_cross_space_switches_only_the_control_generation() {
         Arc::clone(&generations),
         access.clone(),
     ));
+    let activation_intents = Arc::new(ToggleActivationIntent(AtomicBool::new(true)));
     let transitions = V3AdmissionSpaceTransition::new(
         b"profile-salt".to_vec(),
         Arc::clone(&manifests),
         Arc::clone(&generations),
         Arc::clone(&activation),
+        activation_intents.clone(),
     );
     let legacy_checkpoint = AdmissionSpaceTransitionV2::Fresh(FreshSpaceTransitionV1 {
         transition_format_version: FRESH_SPACE_TRANSITION_FORMAT_V1,
@@ -162,10 +202,12 @@ async fn v3_cross_space_switches_only_the_control_generation() {
     let profile_before_legacy_rejection = std::fs::read(source_layout.profile_database()).unwrap();
     let blob_before_legacy_rejection =
         std::fs::read(source_layout.blob_root().join("history.ucbl")).unwrap();
-    assert_eq!(
-        transitions.advance(&legacy_checkpoint).await.unwrap_err(),
-        AdmissionSpaceTransitionError::Inconsistent
-    );
+    let error = transitions.advance(&legacy_checkpoint).await.unwrap_err();
+    assert!(matches!(
+        error,
+        AdmissionSpaceTransitionError::Inconsistent { .. }
+    ));
+    assert!(std::error::Error::source(&error).is_some());
     assert_eq!(
         manifests.load_runtime().await.unwrap(),
         manifest_before_legacy_rejection
@@ -238,6 +280,21 @@ async fn v3_cross_space_switches_only_the_control_generation() {
     let AdmissionSpaceTransitionV2::CrossSpaceControl(activation_started) = &transition else {
         panic!("transition changed format");
     };
+    activation_intents.0.store(false, Ordering::SeqCst);
+    let error = transitions
+        .advance_admission(&transition, activation_intent(&transition))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        AdmissionSpaceTransitionError::Inconsistent { .. }
+    ));
+    assert!(std::error::Error::source(&error).is_some());
+    assert_eq!(
+        manifests.load_runtime().await.unwrap(),
+        Some(ActiveRuntimeManifest::V3(source.clone()))
+    );
+    activation_intents.0.store(true, Ordering::SeqCst);
     let proof = generations
         .reopen_prepared(
             &prepared_target,
@@ -246,7 +303,13 @@ async fn v3_cross_space_switches_only_the_control_generation() {
         .await
         .unwrap();
     activation
-        .activate_cross_space(&source, &proof, &activation_started.target_access_state)
+        .activate_cross_space(
+            &source,
+            &proof,
+            &activation_started.target_access_state,
+            &AllowActivationIntent,
+            activation_intent(&transition),
+        )
         .await
         .unwrap();
     // 模拟 manifest 已提升、transition phase 尚未保存时进程终止；同一持久 phase
@@ -263,7 +326,11 @@ async fn v3_cross_space_switches_only_the_control_generation() {
         CrossSpaceControlTransitionPhaseV3::CleanupPending,
     )
     .await;
-    let result = match transitions.advance(&transition).await.unwrap() {
+    let result = match transitions
+        .advance_admission(&transition, activation_intent(&transition))
+        .await
+        .unwrap()
+    {
         AdmissionSpaceTransitionStepV2::Finished(result) => result,
         AdmissionSpaceTransitionStepV2::Advanced(_) => panic!("transition did not finish"),
     };
@@ -299,6 +366,7 @@ async fn v3_cross_space_switches_only_the_control_generation() {
     .unwrap();
     let return_input = preparation_with_seed(&source_space, return_access.into_bytes(), 0x81);
     let return_transition = transitions.prepare_if_needed(&return_input).await.unwrap();
+    let return_termination = return_transition.clone();
     let AdmissionSpaceTransitionV2::CrossSpaceControl(return_prepared) = &return_transition else {
         panic!("expected the B to A transition to remain control-only");
     };
@@ -323,6 +391,22 @@ async fn v3_cross_space_switches_only_the_control_generation() {
         std::fs::read(source_layout.blob_root().join("history.ucbl")).unwrap(),
         b"unchanged encrypted history"
     );
+
+    transitions
+        .terminate_admission(&return_termination)
+        .await
+        .unwrap();
+    assert!(session.current_space_id().is_err());
+    assert!(manifests
+        .is_admission_target_stopped(&returned)
+        .await
+        .unwrap());
+    let resolver = CurrentSpaceResolver::new(
+        Arc::clone(&manifests),
+        root.join("vault/legacy-space-id"),
+        Arc::clone(&admission_keys),
+    );
+    assert!(resolver.current_space_id().await.unwrap().is_none());
 
     let forbidden = [
         "source-final.sqlite",
@@ -417,6 +501,7 @@ async fn v3_same_space_retains_profile_data_and_keyslot() {
         Arc::clone(&manifests),
         generations,
         activation,
+        Arc::new(AllowActivationIntent),
     );
     let input = preparation(&space, b"same-space-does-not-replace-keyslot".to_vec());
 
@@ -429,7 +514,11 @@ async fn v3_same_space_retains_profile_data_and_keyslot() {
     assert_eq!(prepared.source_control_generation, [0x63; 16]);
 
     loop {
-        match transitions.advance(&transition).await.unwrap() {
+        match transitions
+            .advance_admission(&transition, activation_intent(&transition))
+            .await
+            .unwrap()
+        {
             AdmissionSpaceTransitionStepV2::Advanced(next) => transition = next,
             AdmissionSpaceTransitionStepV2::Finished(result) => {
                 assert!(matches!(
@@ -528,6 +617,7 @@ async fn v3_fresh_promotes_the_first_manifest_without_a_source() {
         Arc::clone(&manifests),
         generations,
         activation,
+        Arc::new(AllowActivationIntent),
     );
     let target_space = SpaceId::from_str("fresh-space");
     let target_access = PrepareAdmissionTargetAccessPort::prepare_target_access(
@@ -544,12 +634,17 @@ async fn v3_fresh_promotes_the_first_manifest_without_a_source() {
         panic!("expected fresh control transition");
     };
     assert_eq!(prepared.profile_data_generation, profile_data_generation);
-    while let AdmissionSpaceTransitionStepV2::Advanced(next) =
-        transitions.advance(&transition).await.unwrap()
+    while let AdmissionSpaceTransitionStepV2::Advanced(next) = transitions
+        .advance_admission(&transition, activation_intent(&transition))
+        .await
+        .unwrap()
     {
         transition = next;
     }
-    let result = transitions.advance(&transition).await.unwrap();
+    let result = transitions
+        .advance_admission(&transition, activation_intent(&transition))
+        .await
+        .unwrap();
     assert!(matches!(
         result,
         AdmissionSpaceTransitionStepV2::Finished(AdmissionSpaceTransitionResultV2::FreshControl(_))
@@ -581,7 +676,7 @@ async fn advance_to(
     expected: CrossSpaceControlTransitionPhaseV3,
 ) -> AdmissionSpaceTransitionV2 {
     let next = match transitions
-        .advance(transition)
+        .advance_admission(transition, activation_intent(transition))
         .await
         .unwrap_or_else(|error| panic!("advance to {expected:?} failed: {error:?}"))
     {
@@ -601,7 +696,11 @@ async fn finish_transition(
     mut transition: AdmissionSpaceTransitionV2,
 ) -> AdmissionSpaceTransitionResultV2 {
     loop {
-        match transitions.advance(&transition).await.unwrap() {
+        match transitions
+            .advance_admission(&transition, activation_intent(&transition))
+            .await
+            .unwrap()
+        {
             AdmissionSpaceTransitionStepV2::Advanced(next) => transition = next,
             AdmissionSpaceTransitionStepV2::Finished(result) => return result,
         }
@@ -704,4 +803,91 @@ fn relationships() -> Vec<AdmissionChangeFacts> {
         }
     })
     .collect()
+}
+
+/// A failed dependency or storage capability must keep its cause when it is
+/// classified into the Application port error; callers classify the chain
+/// (permission denied, storage full, ...) instead of only learning that the
+/// transition failed.
+#[test]
+fn capability_failures_keep_their_source_when_mapped_to_the_port_error() {
+    use super::{map_activation_error, map_control_generation_error, map_manifest_error};
+
+    let manifest = map_manifest_error(ActiveSpaceGenerationManifestStoreError::Storage {
+        source: anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "manifest denied",
+        )),
+    });
+    assert!(matches!(
+        manifest,
+        AdmissionSpaceTransitionError::Storage { .. }
+    ));
+    assert!(std::error::Error::source(&manifest).is_some());
+    assert!(source_chain_has_io_kind(
+        &manifest,
+        std::io::ErrorKind::PermissionDenied
+    ));
+
+    let generation = map_control_generation_error(SpaceControlGenerationError::Storage {
+        source: anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "generation full",
+        )),
+    });
+    assert!(matches!(
+        generation,
+        AdmissionSpaceTransitionError::Storage { .. }
+    ));
+    assert!(source_chain_has_io_kind(
+        &generation,
+        std::io::ErrorKind::StorageFull
+    ));
+
+    let activation = map_activation_error(SpaceTransitionActivationError::Recovery {
+        source: anyhow::Error::new(std::io::Error::other("activation recovery cause")),
+    });
+    assert!(matches!(
+        activation,
+        AdmissionSpaceTransitionError::RecoveryRequired { .. }
+    ));
+    assert!(source_chain_has_io_kind(
+        &activation,
+        std::io::ErrorKind::Other
+    ));
+
+    let busy = map_activation_error(SpaceTransitionActivationError::Busy {
+        source: anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "activation busy",
+        )),
+    });
+    assert!(matches!(
+        busy,
+        AdmissionSpaceTransitionError::Unavailable { .. }
+    ));
+    assert!(source_chain_has_io_kind(
+        &busy,
+        std::io::ErrorKind::PermissionDenied
+    ));
+}
+
+fn source_chain_has_io_kind(
+    error: &AdmissionSpaceTransitionError,
+    kind: std::io::ErrorKind,
+) -> bool {
+    let source = match error {
+        AdmissionSpaceTransitionError::Unavailable { source }
+        | AdmissionSpaceTransitionError::Storage { source }
+        | AdmissionSpaceTransitionError::Inconsistent { source }
+        | AdmissionSpaceTransitionError::RecoveryRequired { source } => source,
+        AdmissionSpaceTransitionError::UnreadableHistoryRequiresConfirmation
+        | AdmissionSpaceTransitionError::Locked
+        | AdmissionSpaceTransitionError::InsufficientStorage => return false,
+    };
+    source.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == kind)
+    })
 }

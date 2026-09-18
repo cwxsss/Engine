@@ -13,12 +13,15 @@ use uc_core::ports::{
 use uc_observability_contract::analytics::AnalyticsFacade;
 
 use crate::clipboard::write::MobileConsumableBackfill;
-use crate::deps::{ApplicationDeps, DeviceManagementResetDataPort};
+use crate::deps::{
+    ApplicationDeps, ApplyEncryptionPassphraseChangePort, DeviceManagementResetDataPort,
+    PrepareSpaceAdmissionCredentialsPort,
+};
 use crate::deps::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, RePairingStateStorePort,
     SpaceAccessPorts, SpaceRebuildProgressPort,
 };
-use crate::space::SpaceRuntimeAdapters;
+use crate::space::{KnownPeerContact, SpaceRuntimeAdapters};
 
 pub(crate) struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
@@ -27,7 +30,8 @@ pub(crate) struct SpaceSessionDeps {
     pub current_engine_version: String,
     pub current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
     pub initial_space_activation: Arc<dyn InitialSpaceActivationPort>,
-    pub admission_credentials: Arc<dyn crate::deps::PrepareSpaceAdmissionCredentialsPort>,
+    pub admission_credentials: Arc<dyn PrepareSpaceAdmissionCredentialsPort>,
+    pub encryption_passphrase_change: Arc<dyn ApplyEncryptionPassphraseChangePort>,
 }
 
 pub(crate) struct SpaceAdmissionDeps {
@@ -39,7 +43,7 @@ pub(crate) struct SpaceAdmissionDeps {
     pub pairing_invitation: Arc<dyn PairingInvitationPort>,
     pub pairing_invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
     pub pairing_invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,
-    pub presence: Arc<dyn PeerReachabilityPort>,
+    pub peer_reachability: Arc<dyn PeerReachabilityPort>,
     pub analytics: Arc<dyn AnalyticsFacade>,
     pub connection_channel: Option<Arc<dyn uc_core::ports::ConnectionChannelPort>>,
 }
@@ -62,5 +66,7 @@ pub(crate) struct SpaceFacadeDeps {
     pub runtime_adapters: SpaceRuntimeAdapters,
     pub peer_reachability_changed_events:
         broadcast::Receiver<uc_core::ports::PeerReachabilityChanged>,
+    pub known_peer_contacts: broadcast::Receiver<KnownPeerContact>,
     pub admission_observations: Arc<crate::space::SpaceAdmissionObservationRegistry>,
+    pub space_transition_changes: tokio::sync::watch::Sender<()>,
 }

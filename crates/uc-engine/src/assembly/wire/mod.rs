@@ -25,7 +25,7 @@ use uc_application::deps::{
     ApplicationDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts,
     ConfigMigrationDeps, CurrentSpaceIdentityPort, DevicePorts, DirectoryReceivePorts,
     FileTransferPorts, InitialSpaceActivationPort, PortableCurrentSpaceIdentityPort,
-    PrepareProfileLifecycleUseCase, ProfileLifecycleRepositoryPort, ProfileLifecycleState,
+    ProfileLifecycle, ProfileLifecycleRepositoryPort, ProfileLifecycleState,
     RePairingStateStorePort, SearchPorts, SecurityPorts, SpaceAccessPorts,
     SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
@@ -164,6 +164,7 @@ struct InfraLayer {
 }
 
 pub struct CoreWiringInputs {
+    pub profile_lifecycle: ProfileLifecycle,
     pub paths: AppPaths,
     pub secure_storage: Arc<dyn SecureStoragePort>,
     pub profile_id: ProfileId,
@@ -317,6 +318,7 @@ pub async fn wire_dependencies_from_inputs(
     inputs: CoreWiringInputs,
 ) -> WiringResult<WiredDependencies> {
     let CoreWiringInputs {
+        profile_lifecycle,
         paths,
         secure_storage,
         profile_id,
@@ -340,10 +342,6 @@ pub async fn wire_dependencies_from_inputs(
     let app_data_root = paths.app_data_root_dir.clone();
     let profile_lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort> =
         Arc::new(ProfileLifecycleRepository::new(Arc::clone(&secure_storage)));
-    let profile_lifecycle =
-        PrepareProfileLifecycleUseCase::new(Arc::clone(&profile_lifecycle_repository))
-            .execute()
-            .map_err(|error| WiringError::DatabaseInit(error.to_string()))?;
     let admission_keys = Arc::new(AdmissionKeyManager::new(
         Arc::clone(&secure_storage),
         profile_lifecycle.generation().into_bytes(),
@@ -478,6 +476,15 @@ pub async fn wire_dependencies_from_inputs(
         Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
         Arc::clone(&admission_state),
     ));
+    let encryption_passphrase_change = Arc::new(uc_infra::space::EncryptionPassphraseChange::new(
+        Arc::clone(&space_access_adapter),
+        Arc::clone(&admission_credentials),
+        Arc::clone(&active_generation_manifest_store),
+    ));
+    encryption_passphrase_change
+        .recover_pending()
+        .await
+        .map_err(|source| WiringError::PassphraseChangeRecovery { source })?;
     let (
         admission_space_transition,
         device_management_reset_data,
@@ -510,6 +517,8 @@ pub async fn wire_dependencies_from_inputs(
                     Arc::clone(&active_generation_manifest_store),
                     Arc::clone(&control_generations),
                     Arc::clone(&activation),
+                    admission_state.clone()
+                        as Arc<dyn uc_application::deps::ValidateJoinerActivationIntentPort>,
                 )
             }
             None => V3AdmissionSpaceTransition::new(
@@ -517,6 +526,8 @@ pub async fn wire_dependencies_from_inputs(
                 Arc::clone(&active_generation_manifest_store),
                 Arc::clone(&control_generations),
                 Arc::clone(&activation),
+                admission_state.clone()
+                    as Arc<dyn uc_application::deps::ValidateJoinerActivationIntentPort>,
             ),
         });
         let device_reset = Arc::new(V3DeviceManagementReset::new(
@@ -1014,6 +1025,7 @@ pub async fn wire_dependencies_from_inputs(
             membership_projection,
             admission_state,
             admission_credentials,
+            encryption_passphrase_change,
             admission_space_transition,
             re_pairing_state_store,
             membership_branch_transition_executor,
