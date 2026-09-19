@@ -12,7 +12,7 @@ use super::inventory::SecretValue;
 use super::security_stream::{ArchiveReader, ArchiveWriter};
 use super::store::backup_error;
 use crate::security::profile_backup_archive::tree::open_regular_file;
-use crate::security::profile_backup_archive::{private_new_file, sync_directory};
+use crate::security::profile_backup_archive::{private_new_file, publish_alias, sync_directory};
 use crate::security::{MasterKey, ProfileArchiveReceipt};
 
 pub(super) const RECORD_KEY: &str = "profile_upgrade_backup_record_key:v1";
@@ -143,7 +143,7 @@ pub(super) fn publish_record(
         .sync_all()
         .map_err(backup_error)?;
     let pending = directory.join(format!("{}.pointer", Uuid::new_v4()));
-    fs::hard_link(&path, &pending).map_err(backup_error)?;
+    publish_alias(&path, &pending).map_err(backup_error)?;
     fs::rename(&pending, directory.join("security-current")).map_err(backup_error)?;
     sync_directory(directory).map_err(backup_error)?;
     let reopened = read_record(directory, storage)?
@@ -192,7 +192,7 @@ pub(super) fn publish_file_record(
     file.write_all(&bytes).map_err(backup_error)?;
     file.sync_all().map_err(backup_error)?;
     let pending = directory.join(format!("{}.pointer", Uuid::new_v4()));
-    fs::hard_link(&path, &pending).map_err(backup_error)?;
+    publish_alias(&path, &pending).map_err(backup_error)?;
     fs::rename(pending, directory.join("current")).map_err(backup_error)?;
     sync_directory(directory).map_err(backup_error)?;
     let reopened = read_file_record(directory)?

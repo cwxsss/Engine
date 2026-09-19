@@ -313,6 +313,48 @@ pub(super) fn create_private_directory_new(path: &Path) -> io::Result<()> {
     private_directory_builder().create(path)
 }
 
+/// 发布"别名"：让 `alias` 与 `source` 同时存在（`source` 保留）。
+///
+/// 首选 `hard_link`（同 inode，零拷贝、零额外磁盘）。两个平台事实迫使这里有回退：
+/// 跨卷返回 `EXDEV`；HarmonyOS 应用沙箱按 MAC 策略拒绝 `link(2)`（实测 `EACCES`）。
+/// 这两种情况下"两个名字同时可见"的发布语义与硬链接无关，因此回退为独立副本。
+pub(in crate::security) fn publish_alias(source: &Path, alias: &Path) -> io::Result<()> {
+    match fs::hard_link(source, alias) {
+        Ok(()) => Ok(()),
+        Err(link_error) => fs::copy(source, alias)
+            .map(|_| ())
+            .map_err(|copy_error| {
+                io::Error::new(
+                    copy_error.kind(),
+                    format!(
+                        "alias publish failed: hard_link: {link_error}; copy: {copy_error}"
+                    ),
+                )
+            }),
+    }
+}
+
+/// 把已写完的 `pending` 提升为 `target`，同时保证不覆盖既有 `target`。
+///
+/// 首选 `hard_link`，并返回 `false` 表示 `pending` 仍在（由调用方删除）—— 这与历史
+/// 行为逐字节一致。平台禁用 `link(2)`（HarmonyOS）时回退 `rename`：`rename` 本身是
+/// 原子的，且调用方持有独占 lease 已把并发发布串行化，所以"目标不存在才发布"的
+/// 不覆盖语义仍然成立。返回 `true` 表示 `pending` 已被消费。
+pub(in crate::security) fn promote_no_clobber(pending: &Path, target: &Path) -> io::Result<bool> {
+    match fs::hard_link(pending, target) {
+        Ok(()) => Ok(false),
+        Err(link_error) => match fs::symlink_metadata(target) {
+            // 目标已存在：保持"不覆盖"原语义，把硬链接的错误原样上报。
+            Ok(_) => Err(link_error),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::rename(pending, target)?;
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        },
+    }
+}
+
 fn private_directory_builder() -> DirBuilder {
     let mut builder = DirBuilder::new();
     #[cfg(unix)]

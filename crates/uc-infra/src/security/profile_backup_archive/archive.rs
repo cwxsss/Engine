@@ -7,8 +7,8 @@ use uuid::Uuid;
 use super::error::invalid_archive;
 use super::tree::read_tree;
 use super::{
-    private_new_file, sync_directory, tree, ProfileArchiveReceipt, ProfileBackupArchiveError,
-    ProfileBackupSource,
+    private_new_file, promote_no_clobber, sync_directory, tree, ProfileArchiveReceipt,
+    ProfileBackupArchiveError, ProfileBackupSource,
 };
 
 /// 只提供单个受管目录的归档与还原，不代表完整用户资料或可用版本回退点。
@@ -67,10 +67,13 @@ impl ProfileBackupArchive {
         if verified_source != source || verified_digest != first_digest {
             return Err(ProfileBackupArchiveError::StateChanged);
         }
-        // 硬链接发布具有“不覆盖既有目标”的语义；未完成文件不作为已验证归档返回。
-        fs::hard_link(&pending, self.path(id))?;
+        // 原子发布且不覆盖既有目标。平台禁用 link(2)（HarmonyOS 沙箱）时回退为
+        // rename —— 见 `promote_no_clobber`。未完成文件不作为已验证归档返回。
+        let pending_consumed = promote_no_clobber(&pending, &self.path(id))?;
         sync_directory(&directory)?;
-        fs::remove_file(&pending)?;
+        if !pending_consumed {
+            fs::remove_file(&pending)?;
+        }
         sync_directory(&directory)?;
         Ok(ProfileArchiveReceipt {
             archive_id: *id.as_bytes(),

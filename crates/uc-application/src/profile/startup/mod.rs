@@ -6,7 +6,7 @@ mod use_case;
 pub use error::{ProfileStartupError, ProfileStartupStorageError, ProfileUpgradeBackupError};
 pub use model::{ProfileUpgradeBackupEntry, ProfileUpgradeSource, ProfileUpgradeVersions};
 pub use ports::{ProfileStartupStoragePort, ProfileUpgradeBackupPort};
-pub use use_case::PrepareProfileStartupUseCase;
+pub use use_case::{PrepareProfileStartupUseCase, ProfileUpgradeBackupPolicy};
 
 #[cfg(test)]
 mod tests;

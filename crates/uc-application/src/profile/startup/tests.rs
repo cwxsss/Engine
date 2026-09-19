@@ -212,6 +212,39 @@ async fn backup_failure_preserves_source_error_and_stops_all_mutations() {
     assert!(fixture.lifecycle.lock().unwrap().is_none());
 }
 
+/// 备份是安全网而非启动前置条件。`WarnAndContinue` 下备份失败必须降级为告警并
+/// 走完全部启动步骤 —— 这正是鸿蒙（link(2) 被沙箱拒绝）与桌面端（secure storage
+/// 迁移改写源文件）永久砖机的修复点。
+#[tokio::test]
+async fn warn_and_continue_degrades_backup_failure_into_a_completed_startup() {
+    let fixture = Fixture::new(BackupMode::Fail);
+    let lifecycle = fixture
+        .workflow()
+        .with_policy(ProfileUpgradeBackupPolicy::WarnAndContinue)
+        .execute()
+        .await
+        .expect("startup must continue without a pre-upgrade backup");
+
+    assert_eq!(
+        *fixture.events.lock().unwrap(),
+        [
+            "read backup state",
+            "capture and verify",
+            "read lifecycle",
+            "adopt old layout",
+            "apply import",
+            "create lifecycle"
+        ]
+    );
+    // 没有备份就没有可保留的副本，依赖备份的步骤必须被跳过。
+    assert!(!fixture
+        .events
+        .lock()
+        .unwrap()
+        .contains(&"preserve security materials"));
+    assert_eq!(fixture.lifecycle.lock().unwrap().as_ref(), Some(&lifecycle));
+}
+
 #[tokio::test]
 async fn cancelled_backup_wait_cannot_adopt_import_or_create_lifecycle() {
     let fixture = Fixture::new(BackupMode::Pending);

@@ -11,6 +11,7 @@ pub use archive::ProfileBackupArchive;
 pub use error::ProfileBackupArchiveError;
 pub use model::{ProfileArchiveReceipt, ProfileBackupSource};
 pub(super) use storage::{private_new_file, sync_directory};
+pub(super) use tree::{promote_no_clobber, publish_alias};
 
 #[cfg(test)]
 mod tests;

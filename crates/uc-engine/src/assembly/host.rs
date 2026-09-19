@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use tracing::warn;
 use uc_application::deps::{
-    PrepareProfileStartupUseCase, ProfileUpgradeBackupPort, ProfileUpgradeVersions,
+    PrepareProfileStartupUseCase, ProfileUpgradeBackupPolicy, ProfileUpgradeBackupPort,
+    ProfileUpgradeVersions,
 };
 use uc_core::app_dirs::{AppDirs, AppPaths};
 use uc_core::clipboard::{
@@ -439,6 +440,29 @@ pub async fn wire_host_capabilities(
     .await
 }
 
+/// 升级前备份失败时的启动取舍。
+///
+/// 默认 `WarnAndContinue`：备份是"升级出错还能回滚"的安全网，**不是启动前置条件**。
+/// 历史行为（fail-closed）在真实平台上会造成**永久砖机**，且应用内没有任何恢复入口：
+/// - HarmonyOS 的应用沙箱按 MAC 策略拒绝 `link(2)`，归档的硬链接发布必然 EACCES；
+/// - 桌面端 secure storage 首次迁移会改写源文件，使既有备份记录的 digest 永久失配。
+///
+/// 需要严格保护资料、宁可拒绝启动也不无备份升级时，用
+/// `UC_PROFILE_BACKUP_STRICT=1`（`0` / 空 / `false` 视为关闭）恢复 fail-closed。
+fn profile_upgrade_backup_policy() -> ProfileUpgradeBackupPolicy {
+    let strict = std::env::var("UC_PROFILE_BACKUP_STRICT")
+        .map(|raw| {
+            let raw = raw.trim();
+            !raw.is_empty() && raw != "0" && !raw.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    if strict {
+        ProfileUpgradeBackupPolicy::FailClosed
+    } else {
+        ProfileUpgradeBackupPolicy::WarnAndContinue
+    }
+}
+
 pub(crate) async fn wire_host_capabilities_with_emitter(
     config: &EngineConfig,
     host: HostCapabilities,
@@ -471,6 +495,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
             engine: env!("CARGO_PKG_VERSION").to_owned(),
         },
     )
+    .with_policy(profile_upgrade_backup_policy())
     .execute()
     .await
     .map_err(|source| WiringError::StorageUpgradePrerequisite {

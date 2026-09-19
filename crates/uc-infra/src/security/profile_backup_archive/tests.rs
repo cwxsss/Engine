@@ -371,3 +371,51 @@ fn source_recheck_detects_changes_without_a_secure_storage_dependency() {
             .unwrap();
     assert_ne!(before, after);
 }
+
+/// HarmonyOS 的应用沙箱拒绝 `link(2)`（实测 EACCES），跨卷则是 EXDEV。发布别名的
+/// 语义（源与别名同时可见）与硬链接无关，因此在任何平台上都必须成功。
+#[test]
+fn publish_alias_keeps_source_and_creates_a_readable_alias() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("record.files");
+    let alias = fixture.root.join("record.pointer");
+    fs::write(&source, b"aliased-payload").unwrap();
+
+    super::tree::publish_alias(&source, &alias).unwrap();
+
+    assert_eq!(fs::read(&source).unwrap(), b"aliased-payload");
+    assert_eq!(fs::read(&alias).unwrap(), b"aliased-payload");
+}
+
+/// 归档发布：目标必须拿到完整内容，且成功后不能留下待处理副本 —— 无论走
+/// `hard_link`（`pending` 由调用方删除）还是 `rename` 回退（`pending` 已被消费）。
+#[test]
+fn promote_no_clobber_publishes_pending_and_leaves_no_stale_partial() {
+    let fixture = Fixture::new();
+    let pending = fixture.root.join("archive.partial");
+    let target = fixture.root.join("archive.archive");
+    fs::write(&pending, b"verified-archive").unwrap();
+
+    let pending_consumed = super::tree::promote_no_clobber(&pending, &target).unwrap();
+
+    assert_eq!(fs::read(&target).unwrap(), b"verified-archive");
+    assert_eq!(
+        pending.exists(),
+        !pending_consumed,
+        "pending must only survive when the caller is expected to remove it"
+    );
+}
+
+/// "不覆盖既有目标"是不变量：目标已存在时必须失败，且既有内容一个字节都不能动。
+#[test]
+fn promote_no_clobber_refuses_to_replace_an_existing_target() {
+    let fixture = Fixture::new();
+    let pending = fixture.root.join("archive.partial");
+    let target = fixture.root.join("archive.archive");
+    fs::write(&target, b"existing-archive").unwrap();
+    fs::write(&pending, b"new-archive").unwrap();
+
+    assert!(super::tree::promote_no_clobber(&pending, &target).is_err());
+
+    assert_eq!(fs::read(&target).unwrap(), b"existing-archive");
+}
