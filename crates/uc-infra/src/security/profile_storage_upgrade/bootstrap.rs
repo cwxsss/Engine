@@ -57,12 +57,22 @@ impl RuntimeUpgradeBootstrap {
         manifests: &ActiveSpaceGenerationManifestStore,
         progress: &UpgradeProgress,
     ) -> Result<UpgradeComponents, ProfileStorageUpgradeError> {
-        let active = manifests.load_runtime_sync().map_err(|source| {
-            ProfileStorageUpgradeError::Manifest {
-                source: anyhow::Error::new(source)
-                    .context("inspect active manifest after acquiring the upgrade lease"),
+        let active = match manifests.load_runtime_sync() {
+            Ok(active) => active,
+            Err(crate::security::ActiveSpaceGenerationManifestStoreError::Corrupt) => {
+                tracing::warn!(
+                    "Active space generation manifest is corrupt or unopenable during upgrade bootstrap; quarantining"
+                );
+                manifests.quarantine_corrupt_manifest_sync();
+                None
             }
-        })?;
+            Err(source) => {
+                return Err(ProfileStorageUpgradeError::Manifest {
+                    source: anyhow::Error::new(source)
+                        .context("inspect active manifest after acquiring the upgrade lease"),
+                });
+            }
+        };
         if matches!(active, Some(ActiveRuntimeManifest::V3(_))) {
             return Ok(UpgradeComponents {
                 target: TargetGenerationStager::cleanup_only(
@@ -105,6 +115,14 @@ impl RuntimeUpgradeBootstrap {
             None => {
                 let legacy_space_id = self.resolve_legacy_space_id().await?;
                 progress.required(legacy_space_id.is_some());
+                if legacy_space_id.is_none() {
+                    let keyslot_store =
+                        crate::fs::key_slot_store::JsonKeySlotStore::new(self.vault_path.clone());
+                    use crate::fs::key_slot_store::KeySlotStore as _;
+                    if let Err(error) = keyslot_store.quarantine().await {
+                        tracing::warn!(%error, "failed to quarantine orphaned keyslot during fresh bootstrap");
+                    }
+                }
                 (
                     legacy_database.to_path_buf(),
                     legacy_blob_root.to_path_buf(),

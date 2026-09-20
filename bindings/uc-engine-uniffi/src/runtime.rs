@@ -2042,9 +2042,47 @@ fn map_devices(result: OperationResult) -> Result<Vec<Device>, BindingError> {
 fn map_workspace_convergence(
     result: OperationResult,
 ) -> Result<WorkspaceConvergence, BindingError> {
-    unpack_operation!(result, OperationResult::WorkspaceMembership(summary) => {
-        map_workspace_convergence_summary(summary)
-    })
+    match result {
+        OperationResult::WorkspaceMembership(summary) => {
+            Ok(map_workspace_convergence_summary(summary))
+        }
+        OperationResult::DeviceTrust(trust) => {
+            Ok(map_workspace_convergence_from_device_trust(trust))
+        }
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_workspace_convergence_from_device_trust(
+    summary: uc_engine::DeviceTrustSnapshotSummary,
+) -> WorkspaceConvergence {
+    let effective_member_count = summary
+        .devices
+        .iter()
+        .filter(|device| {
+            matches!(device.membership, uc_engine::DeviceMembershipSummary::Active)
+        })
+        .count() as u64;
+
+    let phase = WorkspaceConvergencePhase::Complete;
+
+    WorkspaceConvergence {
+        phase,
+        revision: summary.revision,
+        history_event_count: summary.revision,
+        effective_member_count,
+        pending_removal_decision_device_ids: Vec::new(),
+        pending_removal_decision_event_id: None,
+        diverged_peer_device_ids: Vec::new(),
+        upgrade_required_peer_device_ids: Vec::new(),
+        convergence_digest: None,
+        removed: matches!(
+            summary.local_membership,
+            uc_engine::DeviceMembershipSummary::Removed
+        ),
+        updated_at_ms: summary.updated_at_ms,
+        failure_category: None,
+    }
 }
 
 fn map_workspace_convergence_summary(

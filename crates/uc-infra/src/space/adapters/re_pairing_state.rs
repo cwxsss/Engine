@@ -33,6 +33,28 @@ impl EncryptedRePairingStateStore {
             write_lock: Mutex::new(()),
         }
     }
+
+    async fn quarantine_corrupt_state(&self) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let quarantine_path = self.path.with_extension(format!("corrupt.{}", timestamp));
+        tracing::warn!(
+            path = ?self.path,
+            quarantine_path = ?quarantine_path,
+            "Re-pairing state file is corrupt or unreadable; quarantining"
+        );
+        if let Err(error) = fs::rename(&self.path, &quarantine_path).await {
+            tracing::warn!(
+                path = ?self.path,
+                quarantine_path = ?quarantine_path,
+                %error,
+                "Failed to rename corrupt re-pairing state, falling back to removing it"
+            );
+            let _ = fs::remove_file(&self.path).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -43,14 +65,24 @@ impl RePairingStateStorePort for EncryptedRePairingStateStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(_) => return Err(RePairingStateError::Unavailable),
         };
-        let plaintext = self
-            .keys
-            .open_profile_payload(PURPOSE, &ciphertext)
-            .map_err(map_key_error)?;
-        let state: PersistedRePairingStateV1 =
-            postcard::from_bytes(&plaintext).map_err(|_| RePairingStateError::Inconsistent)?;
+        let plaintext = match self.keys.open_profile_payload(PURPOSE, &ciphertext) {
+            Ok(bytes) => bytes,
+            Err(AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed) => {
+                self.quarantine_corrupt_state().await;
+                return Ok(false);
+            }
+            Err(AdmissionKeyError::SecureStorage) => return Err(RePairingStateError::Unavailable),
+        };
+        let state: PersistedRePairingStateV1 = match postcard::from_bytes(&plaintext) {
+            Ok(s) => s,
+            Err(_) => {
+                self.quarantine_corrupt_state().await;
+                return Ok(false);
+            }
+        };
         if state.format_version != FORMAT_VERSION {
-            return Err(RePairingStateError::Inconsistent);
+            self.quarantine_corrupt_state().await;
+            return Ok(false);
         }
         Ok(state.required)
     }
@@ -156,5 +188,24 @@ mod tests {
 
         store.set_required(false).await.unwrap();
         assert!(!store.is_required().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn corrupt_or_undecryptable_state_is_quarantined_and_returns_false() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("re-pairing");
+        tokio::fs::write(&path, b"corrupted bytes").await.unwrap();
+
+        let store = store(path.clone());
+        assert!(!store.is_required().await.unwrap());
+        assert!(!path.exists());
+
+        let has_quarantined = std::fs::read_dir(directory.path())
+            .unwrap()
+            .any(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().to_string();
+                name.starts_with("re-pairing") && name.contains("corrupt")
+            });
+        assert!(has_quarantined);
     }
 }

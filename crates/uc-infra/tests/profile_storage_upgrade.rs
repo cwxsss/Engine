@@ -1357,3 +1357,64 @@ async fn an_unowned_source_table_blocks_store_separation() {
     assert!(matches!(error, ProfileStorageUpgradeError::Corrupt { .. }));
     assert!(std::error::Error::source(&error).is_some());
 }
+
+#[tokio::test]
+async fn undecryptable_manifest_from_old_generation_quarantines_and_advances_to_fresh_ready() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("profile");
+    std::fs::create_dir_all(&root).unwrap();
+    let vault_dir = root.join("vault");
+    std::fs::create_dir_all(&vault_dir).unwrap();
+
+    // 1. Create a manifest encrypted with old keys / old generation
+    let old_storage = Arc::new(MemorySecureStorage::default());
+    let old_keys = Arc::new(AdmissionKeyManager::new(old_storage, [0x11; 16]));
+    let old_manifest_store = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault_dir.clone(),
+        Arc::clone(&old_keys),
+    ));
+    let v2 = ActiveSpaceGenerationManifestV2::new(
+        "old-space".to_owned(),
+        [0x21; 16],
+        [0x22; 16],
+        [0x23; 16],
+    )
+    .unwrap();
+    old_manifest_store.promote(&v2).await.unwrap();
+    assert!(vault_dir.join(".active-space-manifest-v2").exists());
+
+    // 2. Now initialize for_runtime with NEW keys / new generation (simulating app re-signing / asset store reset)
+    let new_storage = Arc::new(MemorySecureStorage::default());
+    let new_keys = Arc::new(AdmissionKeyManager::new(new_storage.clone(), [0x99; 16]));
+    let new_manifest_store = Arc::new(ActiveSpaceGenerationManifestStore::new(
+        vault_dir.clone(),
+        Arc::clone(&new_keys),
+    ));
+    let current_space = Arc::new(uc_infra::space::CurrentSpaceResolver::new(
+        Arc::clone(&new_manifest_store),
+        vault_dir.join(".current-space-id-v1"),
+        Arc::clone(&new_keys),
+    ));
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        vault_dir.clone(),
+        new_storage.clone(),
+        [0x99; 16],
+    ));
+    let upgrade = ProfileStorageUpgrade::for_runtime(
+        root.clone(),
+        root.join("legacy.sqlite"),
+        root.join("blobs"),
+        uc_core::ids::ProfileId::from("test-profile"),
+        new_storage,
+        vault_dir.clone(),
+        vault,
+        new_keys,
+        new_manifest_store,
+        current_space,
+    );
+
+    let outcome = upgrade.ensure_v3().await.unwrap();
+    assert!(matches!(outcome, ProfileStorageUpgradeOutcome::FreshReady { .. }));
+    // Verify old manifest was quarantined
+    assert!(!vault_dir.join(".active-space-manifest-v2").exists());
+}

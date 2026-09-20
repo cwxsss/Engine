@@ -323,6 +323,7 @@ impl OhEngine {
             .map_err(engine_error)?;
         match result {
             OperationResult::WorkspaceMembership(summary) => workspace_convergence(summary),
+            OperationResult::DeviceTrust(trust) => workspace_convergence_from_device_trust(trust),
             _ => Err(unexpected_result()),
         }
     }
@@ -643,6 +644,40 @@ fn workspace_convergence(
             }
             uc_engine::WorkspaceConvergenceFailureCategorySummary::Storage => "storage".to_owned(),
         }),
+    })
+}
+
+fn workspace_convergence_from_device_trust(
+    summary: uc_engine::DeviceTrustSnapshotSummary,
+) -> napi::Result<OhWorkspaceConvergence> {
+    let effective_member_count = count_u64(
+        summary
+            .devices
+            .iter()
+            .filter(|device| {
+                matches!(device.membership, uc_engine::DeviceMembershipSummary::Active)
+            })
+            .count() as u64,
+    )?;
+
+    let phase = "complete";
+
+    Ok(OhWorkspaceConvergence {
+        phase: phase.to_owned(),
+        revision: summary.revision as f64,
+        history_event_count: count_u64(summary.revision)?,
+        effective_member_count,
+        pending_removal_decision_device_ids: Vec::new(),
+        pending_removal_decision_event_id: None,
+        diverged_peer_device_ids: Vec::new(),
+        upgrade_required_peer_device_ids: Vec::new(),
+        convergence_digest: None,
+        removed: matches!(
+            summary.local_membership,
+            uc_engine::DeviceMembershipSummary::Removed
+        ),
+        updated_at_ms: summary.updated_at_ms as f64,
+        failure_category: None,
     })
 }
 
@@ -1153,6 +1188,55 @@ mod tests {
             status.upgrade_required_peer_device_ids,
             vec!["device-e".to_owned()]
         );
+    }
+
+    #[test]
+    fn workspace_convergence_from_device_trust_maps_phase_and_counts() {
+        let mut snapshot =
+            uc_engine::DeviceTrustSnapshotSummary::empty_unavailable("local-device".into());
+        snapshot.revision = 5;
+        snapshot.updated_at_ms = 12345;
+        snapshot.local_membership = uc_engine::DeviceMembershipSummary::Active;
+        snapshot
+            .devices
+            .push(uc_engine::DeviceTrustRelationshipSummary {
+                device_id: "local-device".into(),
+                display_name: "Local Device".into(),
+                is_local: true,
+                reachability: uc_engine::DeviceReachabilitySummary::Online,
+                membership: uc_engine::DeviceMembershipSummary::Active,
+                group_relationship: uc_engine::DeviceGroupRelationshipSummary::Consistent,
+                compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
+                sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
+                pairing_confirmation: None,
+                available_actions: Vec::new(),
+                blocked_reason: None,
+            });
+        snapshot
+            .devices
+            .push(uc_engine::DeviceTrustRelationshipSummary {
+                device_id: "peer-device".into(),
+                display_name: "Peer Device".into(),
+                is_local: false,
+                reachability: uc_engine::DeviceReachabilitySummary::Offline,
+                membership: uc_engine::DeviceMembershipSummary::Removed,
+                group_relationship: uc_engine::DeviceGroupRelationshipSummary::Consistent,
+                compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
+                sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
+                pairing_confirmation: None,
+                available_actions: Vec::new(),
+                blocked_reason: None,
+            });
+
+        let status = workspace_convergence_from_device_trust(snapshot)
+            .expect("device trust should map to workspace convergence");
+
+        assert_eq!(status.phase, "complete");
+        assert_eq!(status.revision, 5.0);
+        assert_eq!(status.history_event_count, 5);
+        assert_eq!(status.effective_member_count, 1);
+        assert!(!status.removed);
+        assert_eq!(status.updated_at_ms, 12345.0);
     }
 
     #[test]

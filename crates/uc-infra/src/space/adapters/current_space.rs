@@ -40,20 +40,52 @@ impl EncryptedLegacyCurrentSpaceIdStore {
         }
     }
 
+    async fn quarantine_corrupt_legacy_id(&self) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let quarantine_path = self.path.with_extension(format!("corrupt.{}", timestamp));
+        tracing::warn!(
+            path = ?self.path,
+            quarantine_path = ?quarantine_path,
+            "Legacy current space id file is corrupt or unreadable; quarantining"
+        );
+        if let Err(error) = fs::rename(&self.path, &quarantine_path).await {
+            tracing::warn!(
+                path = ?self.path,
+                quarantine_path = ?quarantine_path,
+                %error,
+                "Failed to rename corrupt legacy current space id, falling back to removing it"
+            );
+            let _ = fs::remove_file(&self.path).await;
+        }
+    }
+
     async fn load(&self) -> Result<Option<SpaceId>, CurrentSpaceIdentityError> {
         let ciphertext = match fs::read(&self.path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(CurrentSpaceIdentityError::Unavailable),
         };
-        let plaintext = self
-            .keys
-            .open_profile_payload(LEGACY_ID_PURPOSE, &ciphertext)
-            .map_err(map_key_error)?;
-        let state: PersistedLegacyCurrentSpaceIdV1 = postcard::from_bytes(&plaintext)
-            .map_err(|_| CurrentSpaceIdentityError::Inconsistent)?;
+        let plaintext = match self.keys.open_profile_payload(LEGACY_ID_PURPOSE, &ciphertext) {
+            Ok(bytes) => bytes,
+            Err(AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed) => {
+                self.quarantine_corrupt_legacy_id().await;
+                return Ok(None);
+            }
+            Err(AdmissionKeyError::SecureStorage) => return Err(CurrentSpaceIdentityError::Unavailable),
+        };
+        let state: PersistedLegacyCurrentSpaceIdV1 = match postcard::from_bytes(&plaintext) {
+            Ok(state) => state,
+            Err(_) => {
+                self.quarantine_corrupt_legacy_id().await;
+                return Ok(None);
+            }
+        };
         if state.format_version != LEGACY_ID_FORMAT_VERSION || state.space_id.is_empty() {
-            return Err(CurrentSpaceIdentityError::Inconsistent);
+            self.quarantine_corrupt_legacy_id().await;
+            return Ok(None);
         }
         Ok(Some(SpaceId::from_str(&state.space_id)))
     }

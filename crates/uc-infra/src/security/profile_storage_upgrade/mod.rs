@@ -204,6 +204,13 @@ impl ProfileStorageUpgrade {
         diagnostic.action = "inspect_manifest";
         let runtime_manifest = match self.manifests.load_runtime_sync() {
             Ok(source) => source,
+            Err(crate::security::ActiveSpaceGenerationManifestStoreError::Corrupt) => {
+                tracing::warn!(
+                    "Active space generation manifest is corrupt or unopenable during advance_once; quarantining"
+                );
+                self.manifests.quarantine_corrupt_manifest_sync();
+                None
+            }
             Err(source) => {
                 return Err(ProfileStorageUpgradeError::Manifest {
                     source: anyhow::Error::new(source)

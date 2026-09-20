@@ -106,8 +106,7 @@ impl RecoverMembershipEffectsUseCase {
         let event_ids = match self.ledger.load_verified().await {
             Ok(snapshot) => {
                 let Some(history) = snapshot.history() else {
-                    report.corrupt_count = 1;
-                    tracing::warn!("成员 effect 恢复缺少已验证历史");
+                    tracing::debug!("成员 effect 恢复：当前未加入空间，无需恢复 effect");
                     return report;
                 };
                 let current_effects = snapshot.record().current_effects(history);

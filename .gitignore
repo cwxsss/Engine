@@ -28,3 +28,4 @@ Thumbs.db
 
 .artifacts/
 .ohos-build/
+/.probe/

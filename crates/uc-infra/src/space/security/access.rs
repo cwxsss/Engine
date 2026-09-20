@@ -252,7 +252,13 @@ impl uc_application::deps::InitializeSpacePort for MigrationSpaceAccessAdapter {
             .await
             .map_err(map_encryption_error)?
         {
-            return Err(SpaceAccessError::AlreadyInitialized);
+            tracing::info!(
+                "orphaned keyslot exists on disk during migration initialize; quarantining"
+            );
+            self.key_material
+                .quarantine_keyslot()
+                .await
+                .map_err(map_encryption_error)?;
         }
         let profile = self
             .current_profile
@@ -1771,9 +1777,12 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
             })? {
                 info!(
                     path = PATH,
-                    "initialize rejected: keyslot already exists on disk"
+                    "orphaned keyslot exists on disk while initializing new space; quarantining"
                 );
-                return Err(SpaceAccessError::AlreadyInitialized);
+                self.key_material.quarantine_keyslot().await.map_err(|e| {
+                    error!(path = PATH, error = %e, "failed to quarantine orphaned keyslot");
+                    SpaceAccessError::Internal(e.to_string())
+                })?;
             }
 
             let profile = self.current_profile.current_profile().await.map_err(|e| {

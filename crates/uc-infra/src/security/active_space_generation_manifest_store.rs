@@ -405,6 +405,50 @@ impl ActiveSpaceGenerationManifestStore {
         }
     }
 
+    pub fn quarantine_corrupt_manifest_sync(&self) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let quarantine_path = self.path.with_extension(format!("corrupt.{}", timestamp));
+        tracing::warn!(
+            manifest_path = ?self.path,
+            quarantine_path = ?quarantine_path,
+            "Active space generation manifest is corrupt or cannot be opened with current keys; quarantining"
+        );
+        if let Err(error) = std::fs::rename(&self.path, &quarantine_path) {
+            tracing::warn!(
+                manifest_path = ?self.path,
+                quarantine_path = ?quarantine_path,
+                %error,
+                "Failed to rename corrupt manifest, falling back to removing it"
+            );
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    pub async fn quarantine_corrupt_manifest_async(&self) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let quarantine_path = self.path.with_extension(format!("corrupt.{}", timestamp));
+        tracing::warn!(
+            manifest_path = ?self.path,
+            quarantine_path = ?quarantine_path,
+            "Active space generation manifest is corrupt or cannot be opened with current keys; quarantining"
+        );
+        if let Err(error) = tokio::fs::rename(&self.path, &quarantine_path).await {
+            tracing::warn!(
+                manifest_path = ?self.path,
+                quarantine_path = ?quarantine_path,
+                %error,
+                "Failed to rename corrupt manifest, falling back to removing it"
+            );
+            let _ = tokio::fs::remove_file(&self.path).await;
+        }
+    }
+
     pub async fn load(
         &self,
     ) -> Result<Option<ActiveSpaceGenerationManifestV2>, ActiveSpaceGenerationManifestStoreError>
@@ -414,7 +458,14 @@ impl ActiveSpaceGenerationManifestStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
-        self.decode(&ciphertext).map(Some)
+        match self.decode(&ciphertext) {
+            Ok(manifest) => Ok(Some(manifest)),
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt) => {
+                self.quarantine_corrupt_manifest_async().await;
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// 读取并认证任一受支持的活动 runtime manifest。
@@ -426,7 +477,14 @@ impl ActiveSpaceGenerationManifestStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
-        self.decode_runtime(&ciphertext).map(Some)
+        match self.decode_runtime(&ciphertext) {
+            Ok(manifest) => Ok(Some(manifest)),
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt) => {
+                self.quarantine_corrupt_manifest_async().await;
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn load_sync(
@@ -438,7 +496,14 @@ impl ActiveSpaceGenerationManifestStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
-        self.decode(&ciphertext).map(Some)
+        match self.decode(&ciphertext) {
+            Ok(manifest) => Ok(Some(manifest)),
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt) => {
+                self.quarantine_corrupt_manifest_sync();
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// `load_runtime` 的同步启动版本；不会把 V3 降级解释成 V2。
@@ -450,7 +515,14 @@ impl ActiveSpaceGenerationManifestStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
-        self.decode_runtime(&ciphertext).map(Some)
+        match self.decode_runtime(&ciphertext) {
+            Ok(manifest) => Ok(Some(manifest)),
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt) => {
+                self.quarantine_corrupt_manifest_sync();
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// 只读取已提升的 V3 runtime manifest；V2 保持显式不支持。
@@ -462,12 +534,33 @@ impl ActiveSpaceGenerationManifestStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
-        let plaintext = self.open_manifest(&ciphertext)?;
-        let format_version = manifest_format_version(&plaintext)?;
+        let plaintext = match self.open_manifest(&ciphertext) {
+            Ok(plaintext) => plaintext,
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt) => {
+                self.quarantine_corrupt_manifest_sync();
+                return Ok(None);
+            }
+            Err(err) => return Err(err),
+        };
+        let format_version = match manifest_format_version(&plaintext) {
+            Ok(version) => version,
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt) => {
+                self.quarantine_corrupt_manifest_sync();
+                return Ok(None);
+            }
+            Err(err) => return Err(err),
+        };
         if format_version != ACTIVE_RUNTIME_MANIFEST_FORMAT_V3 {
             return Err(ActiveSpaceGenerationManifestStoreError::UnsupportedVersion);
         }
-        decode_v3_manifest(&plaintext).map(Some)
+        match decode_v3_manifest(&plaintext) {
+            Ok(manifest) => Ok(Some(manifest)),
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt) => {
+                self.quarantine_corrupt_manifest_sync();
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn decode(
@@ -622,17 +715,18 @@ impl ActiveSpaceGenerationManifestStore {
     ) -> Result<V3ManifestPromotionOutcome, ActiveSpaceGenerationManifestStoreError> {
         let _guard = self.write_lock.lock().await;
         match tokio::fs::read(&self.path).await {
-            Ok(ciphertext) => {
-                let current = self.decode_runtime(&ciphertext)?;
-                return Ok(match current {
-                    ActiveRuntimeManifest::V3(current) if current == *target => {
-                        V3ManifestPromotionOutcome::AlreadyActive
-                    }
-                    ActiveRuntimeManifest::V2(_) | ActiveRuntimeManifest::V3(_) => {
-                        V3ManifestPromotionOutcome::SourceChanged
-                    }
-                });
-            }
+            Ok(ciphertext) => match self.decode_runtime(&ciphertext) {
+                Ok(ActiveRuntimeManifest::V3(current)) if current == *target => {
+                    return Ok(V3ManifestPromotionOutcome::AlreadyActive);
+                }
+                Ok(ActiveRuntimeManifest::V2(_) | ActiveRuntimeManifest::V3(_)) => {
+                    return Ok(V3ManifestPromotionOutcome::SourceChanged);
+                }
+                Err(ActiveSpaceGenerationManifestStoreError::Corrupt) => {
+                    self.quarantine_corrupt_manifest_async().await;
+                }
+                Err(err) => return Err(err),
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         }
@@ -1295,5 +1389,73 @@ mod tests {
                 Err(ActiveSpaceGenerationManifestStoreError::Corrupt)
             ));
         }
+    }
+
+    #[test]
+    fn corrupt_manifest_is_quarantined_and_returns_none_sync() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ActiveSpaceGenerationManifestStore::new(
+            directory.path().to_path_buf(),
+            Arc::new(AdmissionKeyManager::new(
+                Arc::new(MemorySecureStorage::default()),
+                [0xa1; 16],
+            )),
+        );
+        let manifest_path = directory.path().join(ACTIVE_GENERATION_MANIFEST_FILE);
+        std::fs::write(&manifest_path, b"garbage data that cannot be decrypted").unwrap();
+
+        assert_eq!(store.load_runtime_sync().unwrap(), None);
+        assert!(!manifest_path.exists());
+
+        let has_quarantined = std::fs::read_dir(directory.path())
+            .unwrap()
+            .any(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().to_string();
+                name.starts_with(ACTIVE_GENERATION_MANIFEST_FILE) && name.contains("corrupt")
+            });
+        assert!(has_quarantined);
+    }
+
+    #[tokio::test]
+    async fn undecryptable_manifest_from_different_keys_is_quarantined_and_allows_initial_promotion() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage1 = Arc::new(MemorySecureStorage::default());
+        let store1 = ActiveSpaceGenerationManifestStore::new(
+            directory.path().to_path_buf(),
+            Arc::new(AdmissionKeyManager::new(storage1, [0x11; 16])),
+        );
+        let v2 = ActiveSpaceGenerationManifestV2::new(
+            "old-space".to_owned(),
+            [0x21; 16],
+            [0x22; 16],
+            [0x23; 16],
+        )
+        .unwrap();
+        store1.promote(&v2).await.unwrap();
+
+        // Now simulate new app execution with different secure storage / generation
+        let storage2 = Arc::new(MemorySecureStorage::default());
+        let store2 = ActiveSpaceGenerationManifestStore::new(
+            directory.path().to_path_buf(),
+            Arc::new(AdmissionKeyManager::new(storage2, [0x99; 16])),
+        );
+
+        // load_runtime_sync should quarantine and return None
+        assert_eq!(store2.load_runtime_sync().unwrap(), None);
+
+        // promote_initial_v3 should succeed
+        let new_target = ActiveRuntimeManifestV3::new(
+            ActiveRuntimeLayout::new(SpaceId::from_str("new-space"), [0x31; 16], [0x32; 16]).unwrap(),
+            [0x33; 16],
+        )
+        .unwrap();
+        assert_eq!(
+            store2.promote_initial_v3(&new_target).await.unwrap(),
+            V3ManifestPromotionOutcome::Promoted
+        );
+        assert_eq!(
+            store2.load_runtime().await.unwrap(),
+            Some(ActiveRuntimeManifest::V3(new_target))
+        );
     }
 }

@@ -101,4 +101,8 @@ impl KeyMaterialStore {
         }
         self.keyslot_store.delete().await
     }
+
+    pub async fn quarantine_keyslot(&self) -> Result<(), EncryptionError> {
+        self.keyslot_store.quarantine().await
+    }
 }

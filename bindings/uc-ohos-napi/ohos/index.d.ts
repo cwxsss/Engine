@@ -222,12 +222,19 @@ export interface OhSharedDeviceRefresh {
   unavailableSourceCount: number
 }
 
-export interface OhMemberRemoval {
-  phase: 'applied' | 'converging' | 'complete' | 'recovery_required'
-  intentCount: number
+export interface OhWorkspaceConvergence {
+  phase: string
+  revision: number
+  historyEventCount: number
   effectiveMemberCount: number
+  pendingRemovalDecisionDeviceIds: string[]
+  pendingRemovalDecisionEventId?: string
+  divergedPeerDeviceIds: string[]
+  upgradeRequiredPeerDeviceIds: string[]
   convergenceDigest?: string
+  removed: boolean
   updatedAtMs: number
+  failureCategory?: string
 }
 
 export interface OhEngineEvent {
@@ -240,8 +247,8 @@ export interface OhEngineEvent {
   errorCode?: number
   errorCategory?: string
   retryable?: boolean
-  memberRemoval?: OhMemberRemoval
-  sharedDeviceRefresh?: OhSharedDeviceRefresh
+  workspaceConvergence?: OhWorkspaceConvergence
+  deviceTrustRevision?: number
   networkRecoveryPhase?: 'idle' | 'recovering' | 'retry_scheduled' | 'failed'
   nextRetryInMs?: number
   rePairingScope?: 'all_devices'
@@ -282,8 +289,7 @@ export interface OhEngine {
   cancelJoinSpace(joinId: string): Promise<OhJoinSpaceStatus>
   refreshSharedDevices(): Promise<OhSharedDeviceRefreshStarted>
   querySharedDeviceRefresh(requestId: string): Promise<OhSharedDeviceRefresh | null>
-  removeMember(deviceId: string): Promise<OhMemberRemoval>
-  queryMemberRemoval(): Promise<OhMemberRemoval>
+  removeMember(deviceId: string): Promise<OhWorkspaceConvergence>
   queryActiveClipboard(): Promise<OhActiveClipboard | null>
   lifecycleState(): Promise<string>
   suspend(): Promise<void>

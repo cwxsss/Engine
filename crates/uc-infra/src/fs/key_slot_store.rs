@@ -9,6 +9,7 @@ pub trait KeySlotStore: Send + Sync {
     async fn load(&self) -> Result<KeySlotFile, EncryptionError>;
     async fn store(&self, slot: &KeySlotFile) -> Result<(), EncryptionError>;
     async fn delete(&self) -> Result<(), EncryptionError>;
+    async fn quarantine(&self) -> Result<(), EncryptionError>;
 }
 
 pub struct JsonKeySlotStore {
@@ -97,6 +98,33 @@ impl KeySlotStore for JsonKeySlotStore {
             tokio::fs::remove_file(&path)
                 .await
                 .map_err(|_| EncryptionError::IoFailure)?;
+        }
+
+        if self.path.is_dir() {
+            tokio::fs::remove_dir_all(&self.path)
+                .await
+                .map_err(|_| EncryptionError::IoFailure)?;
+        }
+
+        Ok(())
+    }
+
+    async fn quarantine(&self) -> Result<(), EncryptionError> {
+        let path = self.effective_path();
+
+        if path.exists() {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let quarantine_path = path.with_extension(format!("json.corrupt.{timestamp}"));
+
+            if let Err(e) = tokio::fs::rename(&path, &quarantine_path).await {
+                tracing::warn!(error = %e, "Failed to rename keyslot to quarantine path, removing file directly");
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(|_| EncryptionError::IoFailure)?;
+            }
         }
 
         if self.path.is_dir() {

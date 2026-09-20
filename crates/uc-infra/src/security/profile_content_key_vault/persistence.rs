@@ -59,6 +59,29 @@ impl VaultPersistence {
             .ok_or(ProfileContentKeyVaultError::KeyNotFound)
     }
 
+    async fn quarantine_corrupt_vault(&self, reason: &str) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let quarantine_path = self.path.with_extension(format!("corrupt.{}", timestamp));
+        tracing::warn!(
+            path = ?self.path,
+            quarantine_path = ?quarantine_path,
+            reason = %reason,
+            "Profile content key vault is unreadable or orphaned; quarantining"
+        );
+        if let Err(error) = tokio::fs::rename(&self.path, &quarantine_path).await {
+            tracing::warn!(
+                path = ?self.path,
+                quarantine_path = ?quarantine_path,
+                %error,
+                "Failed to rename corrupt content key vault, falling back to removing it"
+            );
+            let _ = tokio::fs::remove_file(&self.path).await;
+        }
+    }
+
     pub(super) async fn load_optional(
         &self,
     ) -> Result<Option<(PersistedVault, MasterKey)>, ProfileContentKeyVaultError> {
@@ -79,29 +102,47 @@ impl VaultPersistence {
         if ciphertext.len() > MAX_ENCRYPTED_VAULT_BYTES {
             return Err(ProfileContentKeyVaultError::CapacityExceeded);
         }
-        let encrypted: EncryptedBlob = serde_json::from_slice(&ciphertext).map_err(|source| {
-            ProfileContentKeyVaultError::Corrupt {
-                source: anyhow::Error::new(source).context("decode encrypted content key vault"),
+        let encrypted: EncryptedBlob = match serde_json::from_slice(&ciphertext) {
+            Ok(blob) => blob,
+            Err(_) => {
+                self.quarantine_corrupt_vault("decode json failed").await;
+                return Ok(None);
             }
-        })?;
+        };
         let aad = self.aad();
-        validate_framing(&encrypted, &aad)?;
-        let key = self.load_existing_key()?;
-        let plaintext = Zeroizing::new(
-            v1_aead::decrypt_blob_xchacha(&key, &encrypted.nonce, &encrypted.ciphertext, &aad)
-                .map_err(|source| ProfileContentKeyVaultError::Corrupt {
-                    source: anyhow::Error::new(source).context("open profile content key vault"),
-                })?,
-        );
+        if validate_framing(&encrypted, &aad).is_err() {
+            self.quarantine_corrupt_vault("framing/generation mismatch").await;
+            return Ok(None);
+        }
+        let key = match self.load_existing_key() {
+            Ok(key) => key,
+            Err(ProfileContentKeyVaultError::KeyNotFound) => {
+                self.quarantine_corrupt_vault("key not found in secure storage").await;
+                return Ok(None);
+            }
+            Err(source) => return Err(source),
+        };
+        let plaintext = match v1_aead::decrypt_blob_xchacha(&key, &encrypted.nonce, &encrypted.ciphertext, &aad) {
+            Ok(bytes) => Zeroizing::new(bytes),
+            Err(_) => {
+                self.quarantine_corrupt_vault("decrypt failed").await;
+                return Ok(None);
+            }
+        };
         if plaintext.len() > MAX_VAULT_PLAINTEXT_BYTES {
             return Err(ProfileContentKeyVaultError::CapacityExceeded);
         }
-        let vault: PersistedVault = postcard::from_bytes(&plaintext).map_err(|source| {
-            ProfileContentKeyVaultError::Corrupt {
-                source: anyhow::Error::new(source).context("decode profile content key vault"),
+        let vault: PersistedVault = match postcard::from_bytes(&plaintext) {
+            Ok(vault) => vault,
+            Err(_) => {
+                self.quarantine_corrupt_vault("postcard decode failed").await;
+                return Ok(None);
             }
-        })?;
-        catalog::validate(&vault)?;
+        };
+        if catalog::validate(&vault).is_err() {
+            self.quarantine_corrupt_vault("catalog validation failed").await;
+            return Ok(None);
+        }
         Ok(Some((vault, self.derive_profile_search_root(&key)?)))
     }
 
