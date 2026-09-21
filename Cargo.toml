@@ -20,7 +20,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.1.0-rc.17"
+version = "1.1.0-rc.18"
 license = "Apache-2.0"
 
 [workspace.lints.clippy]
@@ -64,6 +64,11 @@ opt-level = 3
 [profile.dev.package.flate2]
 opt-level = 3
 [profile.dev.package.miniz_oxide]
+opt-level = 3
+
+# 移动端开发构建会走完整的加密 blob 流程。保持 Infra 优化，避免大图在
+# 仅由开发配置放大的压缩、分块和本地发布阶段耗费数秒。
+[profile.dev.package.uc-infra]
 opt-level = 3
 
 [profile.release]

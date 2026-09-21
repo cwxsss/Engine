@@ -1,9 +1,13 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::fmt;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
+use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
+use tokio_util::sync::CancellationToken;
 
 use uc_core::ports::{PeerReachabilityChanged, ReachabilityState};
 use uc_observability_contract::diagnostics::connectivity::{
@@ -11,6 +15,7 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 
 use super::{MaintainSpaceMembershipUseCase, MembershipMaintenanceTrigger};
+use crate::space::lifecycle::MembershipSessionActivityPort;
 
 pub trait MembershipNetworkActivityPort: Send + Sync {
     fn pause_network_work(&self);
@@ -20,21 +25,29 @@ pub trait MembershipNetworkActivityPort: Send + Sync {
 enum RuntimeCommand {
     Pause(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
-    PrepareSession(ScheduledRound),
     StateChanged(ScheduledRound),
     Deadline(tokio::time::Instant),
-    Shutdown(oneshot::Sender<()>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Error)]
 pub enum SpaceMembershipMaintenanceRuntimeError {
     #[error("space membership maintenance runtime is closed")]
     Closed,
+    #[error("space membership maintenance task failed")]
+    Task(#[source] Arc<JoinError>),
+}
+
+impl fmt::Debug for SpaceMembershipMaintenanceRuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct SpaceMembershipMaintenanceActivity {
     commands: mpsc::UnboundedSender<RuntimeCommand>,
+    cancel: CancellationToken,
+    failure: Arc<OnceLock<Arc<JoinError>>>,
 }
 
 impl SpaceMembershipMaintenanceActivity {
@@ -47,6 +60,7 @@ impl SpaceMembershipMaintenanceActivity {
     }
 
     pub fn request_state_changed(&self) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
+        self.check_failure()?;
         let round = ScheduledRound::new(MembershipMaintenanceTrigger::StateChanged);
         self.commands
             .send(RuntimeCommand::StateChanged(round))
@@ -56,68 +70,74 @@ impl SpaceMembershipMaintenanceActivity {
                         .observation
                         .not_executed(MaintenanceDisposition::Closed);
                 }
-                SpaceMembershipMaintenanceRuntimeError::Closed
+                self.closed_error()
             })
-    }
-
-    pub async fn prepare_for_session(&self) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
-        let (completed, receiver) = oneshot::channel();
-        let round = ScheduledRound::new(MembershipMaintenanceTrigger::StateChanged)
-            .with_completion(completed);
-        self.commands
-            .send(RuntimeCommand::PrepareSession(round))
-            .map_err(|error| {
-                if let RuntimeCommand::PrepareSession(round) = error.0 {
-                    round
-                        .observation
-                        .not_executed(MaintenanceDisposition::Closed);
-                }
-                SpaceMembershipMaintenanceRuntimeError::Closed
-            })?;
-        receiver
-            .await
-            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)
     }
 
     pub fn request_deadline(
         &self,
         remaining: Duration,
     ) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
+        self.check_failure()?;
         self.commands
             .send(RuntimeCommand::Deadline(
                 tokio::time::Instant::now() + remaining,
             ))
-            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)
+            .map_err(|_| self.closed_error())
     }
 
     async fn request(
         &self,
         command: impl FnOnce(oneshot::Sender<()>) -> RuntimeCommand,
     ) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
+        self.check_failure()?;
         let (completed, receiver) = oneshot::channel();
         self.commands
             .send(command(completed))
-            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)?;
-        receiver
-            .await
-            .map_err(|_| SpaceMembershipMaintenanceRuntimeError::Closed)
+            .map_err(|_| self.closed_error())?;
+        receiver.await.map_err(|_| self.closed_error())
+    }
+
+    fn check_failure(&self) -> Result<(), SpaceMembershipMaintenanceRuntimeError> {
+        match self.failure.get() {
+            Some(source) => Err(SpaceMembershipMaintenanceRuntimeError::Task(Arc::clone(
+                source,
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn closed_error(&self) -> SpaceMembershipMaintenanceRuntimeError {
+        match self.failure.get() {
+            Some(source) => SpaceMembershipMaintenanceRuntimeError::Task(Arc::clone(source)),
+            None => SpaceMembershipMaintenanceRuntimeError::Closed,
+        }
     }
 }
 
-#[async_trait::async_trait]
-impl crate::space::lifecycle::MembershipSessionActivityPort for SpaceMembershipMaintenanceActivity {
-    async fn pause(&self) -> Result<(), String> {
-        self.pause().await.map_err(|error| error.to_string())
+#[async_trait]
+impl MembershipSessionActivityPort for SpaceMembershipMaintenanceActivity {
+    async fn pause(&self) -> anyhow::Result<()> {
+        self.pause().await.map_err(anyhow::Error::new)
     }
 
-    async fn resume(&self) -> Result<(), String> {
-        self.resume().await.map_err(|error| error.to_string())
+    async fn resume(&self) -> anyhow::Result<()> {
+        self.resume().await.map_err(anyhow::Error::new)
     }
 
-    async fn prepare_for_session(&self) -> Result<(), String> {
-        self.prepare_for_session()
-            .await
-            .map_err(|error| error.to_string())
+    fn wake(&self) -> anyhow::Result<()> {
+        self.check_failure().map_err(anyhow::Error::new)?;
+        let round = ScheduledRound::new(MembershipMaintenanceTrigger::StateChanged);
+        self.commands
+            .send(RuntimeCommand::StateChanged(round))
+            .map_err(|error| {
+                if let RuntimeCommand::StateChanged(round) = error.0 {
+                    round
+                        .observation
+                        .not_executed(MaintenanceDisposition::Closed);
+                }
+                anyhow::Error::new(self.closed_error())
+            })
     }
 }
 
@@ -153,7 +173,11 @@ impl SpaceMembershipMaintenanceRuntime {
         history_changes: tokio::sync::watch::Receiver<()>,
     ) -> PreparedSpaceMembershipMaintenanceRuntime {
         let (commands, command_rx) = mpsc::unbounded_channel();
-        let activity = SpaceMembershipMaintenanceActivity { commands };
+        let activity = SpaceMembershipMaintenanceActivity {
+            commands,
+            cancel: CancellationToken::new(),
+            failure: Arc::new(OnceLock::new()),
+        };
         PreparedSpaceMembershipMaintenanceRuntime {
             maintain,
             peer_reachability_changed_events,
@@ -195,15 +219,19 @@ impl SpaceMembershipMaintenanceRuntime {
             mut command_rx,
             mut history_changes,
         } = prepared;
+        let task_cancel = activity.cancel.clone();
+        let failure = Arc::clone(&activity.failure);
         let task = tokio::spawn(async move {
             let mut paused = false;
             let mut peer_reachability_open = true;
             let mut peer_contacts_open = true;
             let mut history_open = true;
-            let mut active_round = Some(spawn_round(
-                Arc::clone(&maintain),
-                ScheduledRound::new(MembershipMaintenanceTrigger::Startup),
-            ));
+            let mut active_round = (!task_cancel.is_cancelled()).then(|| {
+                spawn_round(
+                    Arc::clone(&maintain),
+                    ScheduledRound::new(MembershipMaintenanceTrigger::Startup),
+                )
+            });
             let mut queued_triggers = VecDeque::new();
             let mut deadline: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
             let mut periodic = tokio::time::interval_at(
@@ -212,6 +240,25 @@ impl SpaceMembershipMaintenanceRuntime {
             );
             loop {
                 tokio::select! {
+                    biased;
+                    _ = task_cancel.cancelled() => break,
+                    result = async {
+                        match active_round.as_mut() {
+                            Some(round) => Some(round.await),
+                            None => None,
+                        }
+                    }, if active_round.is_some() => {
+                        active_round = None;
+                        if let Some(Err(source)) = result {
+                            let _ = failure.set(Arc::new(source));
+                            break;
+                        }
+                        if !paused {
+                            if let Some(trigger) = queued_triggers.pop_front() {
+                                active_round = Some(spawn_round(Arc::clone(&maintain), trigger));
+                            }
+                        }
+                    },
                     command = command_rx.recv() => match command {
                         Some(RuntimeCommand::Pause(completed)) => {
                             paused = true;
@@ -221,7 +268,10 @@ impl SpaceMembershipMaintenanceRuntime {
                             }
                             network_activity.pause_network_work();
                             if let Some(round) = active_round.take() {
-                                let _ = round.await;
+                                if let Err(source) = round.await {
+                                    let _ = failure.set(Arc::new(source));
+                                    break;
+                                }
                             }
                             let _ = completed.send(());
                         }
@@ -236,16 +286,6 @@ impl SpaceMembershipMaintenanceRuntime {
                                 ));
                             }
                             let _ = completed.send(());
-                        }
-                        Some(RuntimeCommand::PrepareSession(round)) => {
-                            network_activity.resume_network_work();
-                            paused = false;
-                            schedule_round(
-                                &maintain,
-                                &mut active_round,
-                                &mut queued_triggers,
-                                round,
-                            );
                         }
                         Some(RuntimeCommand::StateChanged(round)) if !paused => {
                             schedule_round(
@@ -264,29 +304,7 @@ impl SpaceMembershipMaintenanceRuntime {
                                 deadline = Some(Box::pin(tokio::time::sleep_until(instant)));
                             }
                         }
-                        Some(RuntimeCommand::Shutdown(completed)) => {
-                            network_activity.pause_network_work();
-                            if let Some(mut round) = active_round.take() {
-                                let _ = tokio::time::timeout(Duration::from_secs(5), &mut round).await;
-                            }
-                            let _ = completed.send(());
-                            break;
-                        }
                         None => break,
-                    },
-                    result = async {
-                        match active_round.as_mut() {
-                            Some(round) => Some(round.await),
-                            None => None,
-                        }
-                    }, if active_round.is_some() => {
-                        let _ = result;
-                        active_round = None;
-                        if !paused {
-                            if let Some(trigger) = queued_triggers.pop_front() {
-                                active_round = Some(spawn_round(Arc::clone(&maintain), trigger));
-                            }
-                        }
                     },
                     changed = history_changes.changed(), if !paused && history_open => {
                         if changed.is_err() { history_open = false; }
@@ -342,6 +360,13 @@ impl SpaceMembershipMaintenanceRuntime {
                     }
                 }
             }
+            network_activity.pause_network_work();
+            // 宿主期限由外层负责；必须等当前完整动作结束后才能释放成员运行期。
+            if let Some(round) = active_round {
+                if let Err(source) = round.await {
+                    let _ = failure.set(Arc::new(source));
+                }
+            }
         });
         Self {
             activity,
@@ -354,23 +379,14 @@ impl SpaceMembershipMaintenanceRuntime {
         self.activity.clone()
     }
 
-    pub async fn shutdown(mut self) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let (completed, receiver) = oneshot::channel();
-        if self
-            .activity
-            .commands
-            .send(RuntimeCommand::Shutdown(completed))
-            .is_ok()
-        {
-            let _ = tokio::time::timeout_at(deadline, receiver).await;
-        }
-        if let Some(mut task) = self.task.take() {
-            if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
-                task.abort();
-                let _ = task.await;
+    pub async fn shutdown(mut self) -> anyhow::Result<()> {
+        self.activity.cancel.cancel();
+        if let Some(task) = self.task.take() {
+            if let Err(source) = task.await {
+                let _ = self.activity.failure.set(Arc::new(source));
             }
         }
+        self.activity.check_failure().map_err(anyhow::Error::new)
     }
 }
 
@@ -382,7 +398,6 @@ fn spawn_round(
         let ScheduledRound {
             trigger,
             mut observation,
-            completed,
         } = round;
         observation.start();
         let report = observation.scope(maintain.execute(trigger)).await;
@@ -396,9 +411,6 @@ fn spawn_round(
             LocalWorkOutcome::Ok
         };
         observation.finish(outcome);
-        if let Some(completed) = completed {
-            let _ = completed.send(());
-        }
     })
 }
 
@@ -411,7 +423,7 @@ fn schedule_round(
     if active_round.is_some() {
         if let Some(existing) = queued_triggers
             .iter()
-            .find(|existing| round.completed.is_none() && existing.trigger == round.trigger)
+            .find(|existing| existing.trigger == round.trigger)
         {
             round.observation.coalesce(&existing.observation);
         } else {
@@ -426,7 +438,6 @@ fn schedule_round(
 struct ScheduledRound {
     trigger: MembershipMaintenanceTrigger,
     observation: MaintenanceObservation,
-    completed: Option<oneshot::Sender<()>>,
 }
 
 impl ScheduledRound {
@@ -442,20 +453,12 @@ impl ScheduledRound {
         Self {
             trigger,
             observation: MaintenanceObservation::request(reason),
-            completed: None,
         }
-    }
-
-    fn with_completion(mut self, completed: oneshot::Sender<()>) -> Self {
-        self.completed = Some(completed);
-        self
     }
 }
 
 impl Drop for SpaceMembershipMaintenanceRuntime {
     fn drop(&mut self) {
-        if let Some(task) = &self.task {
-            task.abort();
-        }
+        self.activity.cancel.cancel();
     }
 }

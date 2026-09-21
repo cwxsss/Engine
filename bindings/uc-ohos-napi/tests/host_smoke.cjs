@@ -8,7 +8,7 @@ async function main() {
   assert.ok(addonPath, 'UC_OHOS_NAPI_NODE must point to the built N-API module');
 
   const addon = require(addonPath);
-  assert.equal(addon.coreVersion(), 'v1.1.0-rc.17');
+  assert.equal(addon.coreVersion(), 'v1.1.0-rc.18');
   assert.equal(typeof addon.installProcessObservability, 'function');
   assert.equal(typeof addon.queryProcessObservabilityHealth, 'function');
   assert.equal(typeof addon.flushProcessObservability, 'function');
@@ -147,7 +147,8 @@ async function main() {
     const preparedHost = addon.prepareHost(host);
     const engine = await addon.startEngine(
       { appVersion: '1.2.3', profileId: 'ohos-host-smoke' },
-      preparedHost
+      preparedHost,
+      addon.createStartupLifecycle()
     );
     const created = await engine.createSpace(
       'ohos-host-smoke',
@@ -228,7 +229,8 @@ async function main() {
     );
     const restarted = await addon.startEngine(
       { appVersion: '1.2.3', profileId: 'ohos-host-smoke' },
-      addon.prepareHost(host)
+      addon.prepareHost(host),
+      addon.createStartupLifecycle()
     );
     await assert.rejects(
       restarted.createSpace('ohos-host-smoke', 'correct horse battery staple'),

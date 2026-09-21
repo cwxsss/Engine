@@ -293,6 +293,7 @@ export interface OhEngine {
   queryActiveClipboard(): Promise<OhActiveClipboard | null>
   lifecycleState(): Promise<string>
   suspend(): Promise<void>
+  suspendWithDeadline(deadlineMs: number): Promise<void>
   resume(): Promise<void>
   sendText(text: string, targetDevices: string[]): Promise<OhSendReport>
   sendImage(bytes: Uint8Array, mimeType: string, targetDevices: string[]): Promise<OhSendReport>
@@ -302,6 +303,12 @@ export interface OhEngine {
   exportEntry(entryId: string, destinationHandle: string): Promise<void>
   nextEvent(timeoutMs: number): Promise<OhEngineEvent | null>
   shutdown(deadlineMs: number): Promise<void>
+  shutdownUntilComplete(): Promise<void>
+}
+
+export interface OhStartupLifecycle {
+  suspendWithDeadline(deadlineMs: number): Promise<void>
+  resume(): Promise<void>
 }
 
 
@@ -385,9 +392,11 @@ declare const engine: {
   flushProcessObservability(deadlineMs: number): Promise<OhObservabilitySignalSummary>
   shutdownProcessObservability(deadlineMs: number): Promise<OhObservabilitySignalSummary>
   prepareHost(host: OhHost): PreparedHost
+  createStartupLifecycle(): OhStartupLifecycle
   startEngine(
     config: { appVersion: string; profileId: string },
-    preparedHost: PreparedHost
+    preparedHost: PreparedHost,
+    lifecycle: OhStartupLifecycle
   ): Promise<OhEngine>
 }
 

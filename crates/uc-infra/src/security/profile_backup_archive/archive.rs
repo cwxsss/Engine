@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
+#[cfg(target_os = "android")]
+use crate::fs::atomic_publish::rename_no_replace_io;
+
 use super::error::invalid_archive;
 use super::tree::read_tree;
 use super::{
@@ -67,7 +70,7 @@ impl ProfileBackupArchive {
         if verified_source != source || verified_digest != first_digest {
             return Err(ProfileBackupArchiveError::StateChanged);
         }
-        // 原子发布且不覆盖既有目标。平台禁用 link(2)（HarmonyOS 沙箱）时回退为
+        // 原子发布且不覆盖既有目标。平台禁用 link(2)（HarmonyOS/Android 沙箱）时回退为
         // rename —— 见 `promote_no_clobber`。未完成文件不作为已验证归档返回。
         let pending_consumed = promote_no_clobber(&pending, &self.path(id))?;
         sync_directory(&directory)?;

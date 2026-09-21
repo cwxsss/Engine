@@ -5,6 +5,24 @@ pub(super) async fn wait_online(engine: &Engine, peer_id: &str) {
     wait_online_within(engine, peer_id, Duration::from_secs(92)).await;
 }
 
+async fn wait_for_first_peer_id(engine: &Engine) -> String {
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        if let Ok(OperationResult::PeerConnections(peers)) =
+            engine.execute(Operation::QueryPeerConnections).await
+        {
+            if let Some(peer) = peers.first() {
+                return peer.peer_id.clone();
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "paired peer query did not become available after session recovery"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn wait_online_within(engine: &Engine, peer_id: &str, budget: Duration) {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
@@ -79,12 +97,7 @@ async fn paired_devices_cold_start_without_refresh() {
     let b_id = join_through(&a, &b, "B", &space_id).await.self_device_id;
     wait_for_active_member_count(&a, 2).await;
     wait_for_active_member_count(&b, 2).await;
-    let OperationResult::PeerConnections(peers) =
-        b.execute(Operation::QueryPeerConnections).await.unwrap()
-    else {
-        panic!("expected peer connections")
-    };
-    let a_id = peers.first().expect("paired A").peer_id.clone();
+    let a_id = wait_for_first_peer_id(&b).await;
     a.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
     b.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
 
@@ -137,12 +150,7 @@ impl Pair {
         let b_id = join_through(&a, &b, "B", &space).await.self_device_id;
         wait_for_active_member_count(&a, 2).await;
         wait_for_active_member_count(&b, 2).await;
-        let OperationResult::PeerConnections(peers) =
-            b.execute(Operation::QueryPeerConnections).await.unwrap()
-        else {
-            panic!("peer connections expected")
-        };
-        let a_id = peers.first().unwrap().peer_id.clone();
+        let a_id = wait_for_first_peer_id(&b).await;
         let pair = Self {
             _rendezvous: rendezvous,
             hosts,
@@ -538,7 +546,20 @@ async fn offline_member_does_not_block_another_members_restart() {
     wait_online(&pair.engines[0], &c_id).await;
     wait_online(&c, &pair.ids[0]).await;
     c.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
-    let c = c_host.start_with_relay_fallback(false).await;
+    let c = tokio::time::timeout(
+        Duration::from_secs(5),
+        c_host.start_with_relay_fallback(false),
+    )
+    .await
+    .expect("an offline member must not delay local startup readiness");
+    let OperationResult::Devices(devices) = c.execute(Operation::ListDevices).await.unwrap() else {
+        panic!("expected the locally restored device list");
+    };
+    assert_eq!(
+        devices.len(),
+        3,
+        "all local device records must remain readable"
+    );
     tokio::join!(
         wait_online(&pair.engines[0], &c_id),
         wait_online(&c, &pair.ids[0])
