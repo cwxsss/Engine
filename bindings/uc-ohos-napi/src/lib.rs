@@ -327,7 +327,7 @@ pub fn create_startup_lifecycle() -> runtime::OhStartupLifecycle {
 pub async fn start_engine(
     config: OhEngineConfig,
     mut prepared_host: External<PreparedHost>,
-    lifecycle: &runtime::OhStartupLifecycle,
+    lifecycle: Option<&runtime::OhStartupLifecycle>,
 ) -> napi::Result<OhEngine> {
     let host = prepared_host.host.take().ok_or_else(|| {
         napi::Error::new(
@@ -335,6 +335,14 @@ pub async fn start_engine(
             "OHOS_HOST_ALREADY_CONSUMED".to_owned(),
         )
     })?;
+    let default_lifecycle;
+    let lifecycle = match lifecycle {
+        Some(l) => l,
+        None => {
+            default_lifecycle = runtime::OhStartupLifecycle::new();
+            &default_lifecycle
+        }
+    };
     OhEngine::start(config, host, lifecycle).await
 }
 
