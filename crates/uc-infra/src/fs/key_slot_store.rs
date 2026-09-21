@@ -9,6 +9,7 @@ pub trait KeySlotStore: Send + Sync {
     async fn load(&self) -> Result<KeySlotFile, EncryptionError>;
     async fn store(&self, slot: &KeySlotFile) -> Result<(), EncryptionError>;
     async fn delete(&self) -> Result<(), EncryptionError>;
+    async fn exists(&self) -> bool;
     async fn quarantine(&self) -> Result<(), EncryptionError>;
 }
 
@@ -109,6 +110,10 @@ impl KeySlotStore for JsonKeySlotStore {
         Ok(())
     }
 
+    async fn exists(&self) -> bool {
+        self.effective_path().exists()
+    }
+
     async fn quarantine(&self) -> Result<(), EncryptionError> {
         let path = self.effective_path();
 
@@ -117,7 +122,7 @@ impl KeySlotStore for JsonKeySlotStore {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let quarantine_path = path.with_extension(format!("json.corrupt.{timestamp}"));
+            let quarantine_path = path.with_extension(format!("corrupt.{}", timestamp));
 
             if let Err(e) = tokio::fs::rename(&path, &quarantine_path).await {
                 tracing::warn!(error = %e, "Failed to rename keyslot to quarantine path, removing file directly");
@@ -128,11 +133,48 @@ impl KeySlotStore for JsonKeySlotStore {
         }
 
         if self.path.is_dir() {
-            tokio::fs::remove_dir_all(&self.path)
-                .await
-                .map_err(|_| EncryptionError::IoFailure)?;
+            let _ = tokio::fs::remove_dir_all(&self.path).await;
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn quarantine_renames_existing_keyslot() {
+        let dir = tempdir().unwrap();
+        let store = JsonKeySlotStore::new(dir.path().to_path_buf());
+        let file_path = dir.path().join("keyslot.json");
+        tokio::fs::write(&file_path, "{}").await.unwrap();
+        assert!(file_path.exists());
+
+        store.quarantine().await.unwrap();
+        assert!(!file_path.exists());
+
+        let mut entries = tokio::fs::read_dir(dir.path()).await.unwrap();
+        let mut found = false;
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("keyslot.corrupt.")
+            {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "quarantined keyslot backup should exist");
+    }
+
+    #[tokio::test]
+    async fn quarantine_succeeds_when_no_keyslot_exists() {
+        let dir = tempdir().unwrap();
+        let store = JsonKeySlotStore::new(dir.path().to_path_buf());
+        store.quarantine().await.unwrap();
     }
 }

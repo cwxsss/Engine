@@ -39,7 +39,9 @@ use uc_application::deps::{RuntimeLifecyclePort, TransitionContext};
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 
-use crate::security::crypto_model::{EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey};
+use crate::security::crypto_model::{
+    validate_kdf, EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey,
+};
 use crate::security::{v1_aead, Kek, MasterKey, ProfileContentKeyVault};
 use uc_core::ids::{DeviceId, ProfileId, SpaceId};
 #[cfg(test)]
@@ -1844,44 +1846,15 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
             let scope = key_scope_from_profile(&profile);
             debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
 
-            let keyslot = self.key_material.load_keyslot(&scope).await.map_err(|e| {
-                warn!(path = PATH, error = %e, "load_keyslot failed");
-                map_encryption_error(e)
-            })?;
-
-            let wrapped_master_key = keyslot.wrapped_master_key.as_ref().ok_or_else(|| {
-                warn!(
-                    path = PATH,
-                    "keyslot on disk has no wrapped_master_key (corrupted key material)"
-                );
-                SpaceAccessError::CorruptedKeyMaterial
-            })?;
-
-            let legacy = LegacyPassphrase(passphrase.expose().to_string());
-            let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot.salt, &keyslot.kdf)
-                .map_err(|e| map_and_log_kdf_error(e, PATH))?;
-            debug!(path = PATH, "KEK derived from passphrase");
-
-            let master_key = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped_master_key.blob)
-                .map_err(|e| map_and_log_unwrap_aead_error(e, PATH))?;
-            debug!(path = PATH, "master key unwrapped");
-
-            // 把派生出的 KEK 重新写入 keyring,保持 keyring 与最新口令对齐
-            // (让下次静默 startup 路径仍可命中)。失败仅 warn,不影响本次解锁。
-            //
-            // 优化:若本进程内已确认 keychain 中存在 KEK
-            // (`try_resume_session` / `do_first_time_init` /
-            // `derive_master_key_for_proof` 任一已置位 `kek_observed`),
-            // 此处 `unwrap` 已经成功——意味着本次派生出的 KEK 字节就是
-            // keychain 里那条记录的字节,再写一次没有信息增量,但在 macOS
-            // 上每次 set_secret 仍可能触发授权弹窗。因此跳过。
-            if self.kek_observed.load(Ordering::Acquire) {
-                debug!("skip store_kek refresh: KEK already observed in keychain this session");
-            } else if let Err(e) = self.key_material.store_kek(&scope, &kek).await {
-                warn!(error = %e, "store_kek refresh failed (non-fatal)");
-            } else {
-                self.kek_observed.store(true, Ordering::Release);
-            }
+            let master_key = match self
+                .key_material
+                .authenticate_and_restore_kek(&scope, passphrase)
+                .await
+            {
+                Ok(master_key) => master_key,
+                Err(error) => return Err(map_encryption_error(error)),
+            };
+            self.kek_observed.store(true, Ordering::Release);
 
             self.activate_session(space_id, master_key).await?;
 
@@ -2111,6 +2084,10 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 );
                 SpaceAccessError::CorruptedKeyMaterial
             })?;
+            if validate_kdf(&keyslot.kdf).is_err() {
+                warn!(path = PATH, "offer keyslot KDF parameters are unsupported or excessive");
+                return Err(SpaceAccessError::CorruptedKeyMaterial);
+            }
             let scope = keyslot.scope.clone();
             debug!(path = PATH, scope = %scope_identifier(&scope), "parsed keyslot from offer blob");
 
@@ -5470,6 +5447,40 @@ mod admission_tests {
     }
 
     #[tokio::test]
+    async fn join_offer_rejects_excessive_kdf_parameters_before_derivation() {
+        use crate::security::crypto_model::MAX_KDF_PARALLELISM;
+        use uc_core::ports::space::DeriveProofKeyPort;
+
+        let (sponsor, _, _, space_id, _sponsor_dir) = sponsor_fixture();
+        let mut offer = sponsor
+            .prepare_join_offer(&space_id, &Passphrase::new("correct horse battery staple"))
+            .await
+            .unwrap();
+        let mut slot: KeySlot = serde_json::from_slice(&offer.keyslot_blob).unwrap();
+        slot.kdf.params.mem_kib = 8 * (MAX_KDF_PARALLELISM + 1);
+        slot.kdf.params.iters = 1;
+        slot.kdf.params.parallelism = MAX_KDF_PARALLELISM + 1;
+        offer.keyslot_blob = serde_json::to_vec(&slot).unwrap();
+
+        let joiner_dir = tempdir().unwrap();
+        let joiner = adapter(
+            &joiner_dir,
+            local_key_material(&joiner_dir, memory_secure_storage()),
+            Arc::new(InMemorySession::new()),
+            memory_revocation_repository(None).0,
+        );
+        let error = DeriveProofKeyPort::derive_master_key_for_proof(
+            &joiner,
+            &offer,
+            &Passphrase::new("correct horse battery staple"),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, SpaceAccessError::CorruptedKeyMaterial));
+    }
+
+    #[tokio::test]
     async fn reliable_revocation_activates_a_new_epoch_for_retained_members_only() {
         let (sponsor, sponsor_session, repository, space_id, _sponsor_dir) = sponsor_fixture();
         let bob = sponsor
@@ -6265,5 +6276,58 @@ mod admission_tests {
             PrepareMembershipBranchRecoveryMaterialError::Invalid { .. }
         ));
         assert!(error.source().is_some());
+    }
+
+    #[tokio::test]
+    async fn initialize_quarantines_orphaned_keyslot_and_succeeds() {
+        let dir = tempdir().unwrap();
+        let key_store = Arc::new(JsonKeySlotStore::new(dir.path().to_path_buf()));
+        let key_material = Arc::new(KeyMaterialStore::new(
+            memory_secure_storage(),
+            key_store.clone(),
+        ));
+        let (adapter, _) = adapter_with_vault(
+            &dir,
+            key_material.clone(),
+            Arc::new(InMemorySession::new()),
+            memory_revocation_repository(None).0,
+        );
+
+        // Simulate an orphaned keyslot.json remaining from a previous generation
+        let keyslot_path = dir.path().join("keyslot.json");
+        tokio::fs::write(&keyslot_path, "{}").await.unwrap();
+        assert!(keyslot_path.exists());
+
+        let space_id = SpaceId::new();
+        let passphrase = Passphrase::new("test passphrase for recovery");
+
+        // initialize should quarantine the orphaned keyslot and succeed
+        let result = SpaceAccessStore::initialize(&adapter, &space_id, &passphrase).await;
+        assert!(
+            result.is_ok(),
+            "initialize should succeed despite orphaned keyslot: {:?}",
+            result.err()
+        );
+
+        // The original keyslot.json should have been initialized with new material
+        assert!(keyslot_path.exists());
+
+        // A quarantined backup file should exist
+        let mut entries = tokio::fs::read_dir(dir.path()).await.unwrap();
+        let mut found_quarantine = false;
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("keyslot.corrupt.")
+            {
+                found_quarantine = true;
+                break;
+            }
+        }
+        assert!(
+            found_quarantine,
+            "orphaned keyslot should have been quarantined to backup file"
+        );
     }
 }

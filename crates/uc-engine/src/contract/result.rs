@@ -5,13 +5,14 @@ use serde::{Deserialize, Serialize};
 use super::{EngineError, ResendEntryOutcome, SendReportSummary};
 use crate::{
     ConfigExportOutcome, ConfigImportPreviewOutcome, ConfigImportStageOutcome,
-    DebugModeUpdateSummary, DiagnosticLogsExportSummary, DiagnosticsStatusSummary,
-    MobileAuthenticatedSession, MobileAuthenticationOutcome, MobileDeviceRegistrationOutcome,
-    MobileDeviceRevokeOutcome, MobileDeviceSummary, MobileDeviceUpdateOutcome,
-    MobileFileUploadHandle, MobileLanInterfaceSummary, MobileSyncDocument,
-    MobileSyncDocumentApplyOutcome, MobileSyncFileReadOutcome, MobileSyncSettingsSummary,
-    MobileSyncSettingsUpdateOutcome, RelayCredentialStatus, RelayProbeOutcome, SaveRelayOutcome,
-    SettingsSummary, SettingsUpdateOutcome, UpgradeStatusSummary,
+    CustomRelayMutationOutcome, CustomRelaySummary, DebugModeUpdateSummary,
+    DiagnosticLogsExportSummary, DiagnosticsStatusSummary, MobileAuthenticatedSession,
+    MobileAuthenticationOutcome, MobileDeviceRegistrationOutcome, MobileDeviceRevokeOutcome,
+    MobileDeviceSummary, MobileDeviceUpdateOutcome, MobileFileUploadHandle,
+    MobileLanInterfaceSummary, MobileSyncDocument, MobileSyncDocumentApplyOutcome,
+    MobileSyncFileReadOutcome, MobileSyncSettingsSummary, MobileSyncSettingsUpdateOutcome,
+    RelayCredentialStatus, RelayProbeOutcome, SaveRelayOutcome, SettingsSummary,
+    SettingsUpdateOutcome, UpgradeStatusSummary,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,6 +453,7 @@ pub enum OperationResult {
     SpaceUnlocked {
         space_id: String,
     },
+    ProfileRecovery(ProfileRecoverySummary),
     SessionRecovered {
         unlocked: bool,
         resumed: bool,
@@ -482,6 +484,8 @@ pub enum OperationResult {
     NetworkRecovered,
     NetworkRecoveryStatus(NetworkRecoveryStatusSummary),
     Settings(Box<SettingsSummary>),
+    CustomRelays(Vec<CustomRelaySummary>),
+    CustomRelayMutated(CustomRelayMutationOutcome),
     SettingsUpdated(SettingsUpdateOutcome),
     RelaySaved(SaveRelayOutcome),
     RelayProbed(RelayProbeOutcome),
@@ -662,6 +666,9 @@ impl fmt::Debug for OperationResult {
             Self::SpaceCreated { .. } => debug.field("kind", &"space_created"),
             Self::JoinSpace(status) => debug.field("kind", &"join_space").field("status", status),
             Self::SpaceUnlocked { .. } => debug.field("kind", &"space_unlocked"),
+            Self::ProfileRecovery(summary) => debug
+                .field("kind", &"profile_recovery")
+                .field("summary", summary),
             Self::SessionRecovered { unlocked, resumed } => debug
                 .field("kind", &"session_recovered")
                 .field("unlocked", unlocked)
@@ -701,6 +708,12 @@ impl fmt::Debug for OperationResult {
                 .field("kind", &"network_recovery_status")
                 .field("status", status),
             Self::Settings(_) => debug.field("kind", &"settings"),
+            Self::CustomRelays(relays) => debug
+                .field("kind", &"custom_relays")
+                .field("relay_count", &relays.len()),
+            Self::CustomRelayMutated(outcome) => debug
+                .field("kind", &"custom_relay_mutated")
+                .field("outcome", outcome),
             Self::SettingsUpdated(outcome) => debug
                 .field("kind", &"settings_updated")
                 .field("outcome", outcome),
@@ -1024,6 +1037,35 @@ pub struct PeerConnectionRefreshSummary {
 pub struct EncryptionStateSummary {
     pub initialized: bool,
     pub session_ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileRecoveryState {
+    NotRequired,
+    AwaitingPassphrase,
+    Recovering,
+    Recovered,
+    PartiallyRecoverable,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileRecoverySummary {
+    pub state: ProfileRecoveryState,
+    pub can_submit_passphrase: bool,
+    pub restart_required: bool,
+    pub background_ready: bool,
+    pub cleanup_pending: bool,
+    pub losses: Vec<ProfileRecoveryLoss>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileRecoveryLoss {
+    LocalHistory,
+    LocalControlState,
+    DeviceIdentity,
 }
 
 impl fmt::Debug for LocalDeviceSummary {

@@ -48,8 +48,9 @@ use crate::operations::settings::encryption::{
     execute_lock_encryption, execute_query_encryption_state, execute_verify_secure_storage_access,
 };
 use crate::operations::settings::settings::{
-    execute_probe_relay, execute_query_relay_credential, execute_query_settings,
-    execute_save_relay, execute_update_settings,
+    execute_mutate_custom_relay, execute_probe_relay, execute_query_custom_relays,
+    execute_query_relay_credential, execute_query_settings, execute_save_relay,
+    execute_update_settings,
 };
 use crate::operations::settings::storage::{
     execute_clear_storage_cache, execute_query_storage_stats,
@@ -76,7 +77,10 @@ use crate::operations::space::membership_readiness::execute_query_membership_rea
 use crate::operations::space::session_recovery::execute_recover_session;
 use crate::operations::space::setup_state::execute_query_setup_state;
 use crate::operations::space::unlock::execute_unlock_space;
-use crate::{EngineError, EngineErrorCategory, Operation, OperationResult};
+use crate::{
+    EngineError, EngineErrorCategory, Operation, OperationResult, ProfileRecoveryState,
+    ProfileRecoverySummary,
+};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::facade::NetworkRecoveryRequestError;
@@ -256,6 +260,13 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::QuerySettings => {
                     execute_query_settings(self.current_facade().await?.as_ref()).await
                 }
+                Operation::QueryCustomRelays => {
+                    execute_query_custom_relays(self.current_facade().await?.as_ref()).await
+                }
+                Operation::MutateCustomRelay(mutation) => {
+                    execute_mutate_custom_relay(self.current_facade().await?.as_ref(), mutation)
+                        .await
+                }
                 Operation::UpdateSettings(patch) => {
                     execute_update_settings(self.current_facade().await?.as_ref(), *patch).await
                 }
@@ -376,6 +387,16 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::QueryEncryptionState => {
                     execute_query_encryption_state(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryProfileRecovery => {
+                    Ok(OperationResult::ProfileRecovery(ProfileRecoverySummary {
+                        state: ProfileRecoveryState::NotRequired,
+                        can_submit_passphrase: false,
+                        restart_required: false,
+                        background_ready: true,
+                        cleanup_pending: false,
+                        losses: Vec::new(),
+                    }))
                 }
                 Operation::QueryMembershipReadiness => Err(super::operation_unavailable_error()),
                 Operation::LockEncryption => {
